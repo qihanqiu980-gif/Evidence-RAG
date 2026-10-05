@@ -1,0 +1,14 @@
+{"id":"spec-wifi6","question":"星云智联 AX6000 支持哪个 WiFi 标准？","history":[],"expected_document_prefixes":["01-"],"expected_refusal":"none"}
+{"id":"install-admin-login","question":"首次安装时如何进入 AX6000 的管理后台？","history":[],"expected_document_prefixes":["02-"],"expected_refusal":"none"}
+{"id":"wifi-default-password","question":"默认 WiFi 名称和初始密码在哪里查看？","history":[],"expected_document_prefixes":["02-","03-"],"expected_refusal":"none"}
+{"id":"wifi-change-password","question":"怎么修改 WiFi 名称和密码？","history":[],"expected_document_prefixes":["03-"],"expected_refusal":"none"}
+{"id":"guest-network-isolation","question":"访客网络能访问主网络里的打印机吗？","history":[],"expected_document_prefixes":["03-"],"expected_refusal":"none"}
+{"id":"mesh-max-nodes","question":"AX6000 Mesh 组网最多支持几台设备？","history":[],"expected_document_prefixes":["04-"],"expected_refusal":"none"}
+{"id":"firmware-upgrade-power","question":"固件升级期间能断电吗？","history":[],"expected_document_prefixes":["04-"],"expected_refusal":"none"}
+{"id":"factory-reset-duration","question":"恢复出厂设置需要长按 Reset 多久？","history":[],"expected_document_prefixes":["04-"],"expected_refusal":"none"}
+{"id":"wan-light-unplugged","question":"WAN 口灯不亮且无法上网应该怎么排查？","history":[],"expected_document_prefixes":["05-"],"expected_refusal":"none"}
+{"id":"wifi-light-red","question":"WiFi 指示灯不亮或变红表示什么？","history":[],"expected_document_prefixes":["05-"],"expected_refusal":"none"}
+{"id":"warranty-period","question":"整机保修期是多长时间？","history":[],"expected_document_prefixes":["06-"],"expected_refusal":"none"}
+{"id":"outside-scope-stock","question":"星云智联公司的股票今天涨了多少？","history":[],"expected_document_prefixes":[],"expected_refusal":"all"}
+{"id":"partial-mesh-and-price","question":"AX6000 Mesh 最多几台？官方零售价是多少？","history":[],"expected_document_prefixes":["04-"],"expected_refusal":"partial"}
+{"id":"followup-mesh-limit","question":"它最多支持几台 Mesh 节点？","history":[{"role":"user","content":"我有一台星云智联 AX6000。"},{"role":"assistant","content":"星云智联 AX6000 是一款 WiFi 6 双频智能路由器，支持同型号 Mesh 组网。"}],"expected_document_prefixes":["04-"],"expected_refusal":"none"}

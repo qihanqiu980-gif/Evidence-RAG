@@ -1,0 +1,2 @@
+[console_scripts]
+rag-app = rag_app.cli:main
