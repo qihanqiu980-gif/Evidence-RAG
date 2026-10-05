@@ -113,6 +113,11 @@ export const uploadDocumentsAsync = (kbId: string, files: File[]) => {
 export const getUploadJob = (jobId: string) =>
   request<UploadJobSummary>(`/api/jobs/${encodeURIComponent(jobId)}`)
 
+export const cancelUploadJob = (jobId: string) =>
+  request<UploadJobSummary>(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
+  })
+
 export const importDemoDocuments = (kbId: string) =>
   requestBatch(
     `/api/knowledge-bases/${encodeURIComponent(kbId)}/import-demo`,

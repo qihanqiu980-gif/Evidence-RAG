@@ -1,10 +1,15 @@
 
 import json
 import logging
+import threading
+import time
+from datetime import UTC, datetime
 
+import pytest
 from fastapi.testclient import TestClient
 
 from rag_app.api.app import build_app
+from rag_app.models import Document, DocumentStatus
 from tests.conftest import make_settings
 from tests.fakes.provider import FakeProvider
 
@@ -20,7 +25,7 @@ def test_status_reports_configuration_missing_without_model_or_key(tmp_path):
     assert payload["limits"] == {
         "max_files_per_upload": 20,
         "max_file_bytes": 5242880,
-        "accepted_extensions": [".md", ".txt", ".pdf", ".docx", ".html"],
+        "accepted_extensions": [".md", ".txt", ".pdf", ".docx", ".html", ".htm"],
     }
     assert "api_key" not in response.text
     assert "embedding_model" not in response.text
@@ -456,3 +461,175 @@ def test_async_upload_returns_job_and_completes(tmp_path):
 
         docs = client.get(f"/api/knowledge-bases/{kb_id}/documents").json()
         assert len(docs) == 1
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "code"),
+    [
+        ("invalid.csv", b"a,b\n", "invalid_extension"),
+        ("big.md", b"x" * 17, "file_too_large"),
+        ("", b"# Router\n", "validation_error"),
+    ],
+)
+def test_async_upload_rejects_invalid_submission_before_job_creation(
+    tmp_path,
+    filename,
+    content,
+    code,
+):
+    settings = make_settings(
+        tmp_path,
+        RAG_APP_UPLOAD_MAX_BYTES="16",
+    )
+    app = build_app(settings, FakeProvider(settings.embedding_dimension))
+
+    with TestClient(app) as client:
+        kb_id = client.post("/api/knowledge-bases", json={"name": "Docs"}).json()["id"]
+        response = client.post(
+            f"/api/knowledge-bases/{kb_id}/documents/async",
+            files=[("files", (filename, content, "application/octet-stream"))],
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == code
+        assert client.get(f"/api/knowledge-bases/{kb_id}/documents").json() == []
+        assert list((settings.data_dir / "spool").glob("*")) == []
+
+
+def test_async_upload_rejects_too_many_files_before_job_creation(tmp_path):
+    settings = make_settings(tmp_path, RAG_APP_UPLOAD_MAX_FILES="1")
+    app = build_app(settings, FakeProvider(settings.embedding_dimension))
+
+    with TestClient(app) as client:
+        kb_id = client.post("/api/knowledge-bases", json={"name": "Docs"}).json()["id"]
+        response = client.post(
+            f"/api/knowledge-bases/{kb_id}/documents/async",
+            files=[
+                ("files", ("one.md", b"# One\n", "text/markdown")),
+                ("files", ("two.md", b"# Two\n", "text/markdown")),
+            ],
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "validation_error"
+        assert client.get(f"/api/knowledge-bases/{kb_id}/documents").json() == []
+        assert list((settings.data_dir / "spool").glob("*")) == []
+
+
+def test_async_upload_normalizes_filename_at_submission(tmp_path):
+    settings = make_settings(tmp_path)
+    app = build_app(settings, FakeProvider(settings.embedding_dimension))
+
+    with TestClient(app) as client:
+        kb_id = client.post("/api/knowledge-bases", json={"name": "Docs"}).json()["id"]
+        response = client.post(
+            f"/api/knowledge-bases/{kb_id}/documents/async",
+            files=[("files", ("../router.md", b"# Router\n", "text/markdown"))],
+        )
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+
+        deadline = time.monotonic() + 5
+        job = None
+        while time.monotonic() < deadline:
+            job = client.get(f"/api/jobs/{job_id}").json()
+            if job["status"] == "completed":
+                break
+            time.sleep(0.05)
+
+        assert job is not None
+        assert job["items"][0]["filename"] == "router.md"
+
+
+def test_cancel_upload_job_contract(tmp_path):
+    import time
+
+    settings = make_settings(tmp_path)
+    app = build_app(settings, FakeProvider(settings.embedding_dimension))
+
+    with TestClient(app) as client:
+        unknown = client.post("/api/jobs/missing/cancel")
+        assert unknown.status_code == 404
+        assert unknown.json()["detail"]["code"] == "not_found"
+
+        kb_id = client.post("/api/knowledge-bases", json={"name": "Docs"}).json()["id"]
+        created = client.post(
+            f"/api/knowledge-bases/{kb_id}/documents/async",
+            files=[("files", ("router.md", b"# Router\n", "text/markdown"))],
+        )
+        job_id = created.json()["job_id"]
+
+        deadline = time.monotonic() + 5
+        job = None
+        while time.monotonic() < deadline:
+            job = client.get(f"/api/jobs/{job_id}").json()
+            if job["status"] == "completed":
+                break
+            time.sleep(0.05)
+
+        assert job is not None
+        assert job["status"] == "completed"
+        finished = client.post(f"/api/jobs/{job_id}/cancel")
+        assert finished.status_code == 409
+        assert finished.json()["detail"]["code"] == "upload_not_cancelable"
+
+
+def test_cancel_api_cancels_queued_job_and_cleans_spool(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path, RAG_APP_UPLOAD_MAX_WORKERS="1")
+    app = build_app(settings, FakeProvider(settings.embedding_dimension))
+    started = threading.Event()
+    release = threading.Event()
+    ingested: list[str] = []
+
+    def blocker(kb_id, filename, content, report):
+        ingested.append(filename)
+        report("校验")
+        started.set()
+        assert release.wait(5)
+        report("完成")
+        return Document(
+            id=f"doc-{filename}",
+            kb_id=kb_id,
+            filename=filename,
+            content_hash=f"hash-{filename}",
+            storage_path=f"uploads/{filename}",
+            chunk_count=1,
+            status=DocumentStatus.READY,
+            created_at=datetime.now(UTC),
+        )
+
+    monkeypatch.setattr(app.state.container.manager, "ingest", blocker)
+    with TestClient(app) as client:
+        kb_id = client.post("/api/knowledge-bases", json={"name": "Docs"}).json()["id"]
+        first_created = client.post(
+            f"/api/knowledge-bases/{kb_id}/documents/async",
+            files=[("files", ("blocker.md", b"first", "text/markdown"))],
+        )
+        assert first_created.status_code == 202
+        assert started.wait(5)
+
+        second_created = client.post(
+            f"/api/knowledge-bases/{kb_id}/documents/async",
+            files=[("files", ("queued.md", b"second", "text/markdown"))],
+        )
+        assert second_created.status_code == 202
+        queued_job_id = second_created.json()["job_id"]
+
+        cancelled = client.post(f"/api/jobs/{queued_job_id}/cancel")
+        assert cancelled.status_code == 202
+        assert cancelled.json()["job_id"] == queued_job_id
+        release.set()
+
+        deadline = time.monotonic() + 5
+        queued_job = None
+        while time.monotonic() < deadline:
+            queued_job = client.get(f"/api/jobs/{queued_job_id}").json()
+            if queued_job["status"] == "cancelled":
+                break
+            time.sleep(0.05)
+
+        assert queued_job is not None
+        assert queued_job["status"] == "cancelled"
+        assert queued_job["items"][0]["code"] == "upload_cancelled"
+        assert ingested == ["blocker.md"]
+        assert list((settings.data_dir / "spool").glob("*")) == []

@@ -40,17 +40,8 @@ class DocumentAdapter:
         }
 
     def prepare(self, filename: str, content: bytes) -> PreparedDocument:
-        display_name = Path(filename.strip()).name
-        if not display_name:
-            raise IngestionError("validation_error", "Filename cannot be empty")
+        display_name = validate_upload_submission(filename, content, self.max_bytes)
         extension = Path(display_name).suffix.lower()
-        if extension not in self._extractors:
-            raise IngestionError(
-                "invalid_extension",
-                "Unsupported file type; supported: .md, .txt, .pdf, .docx, .html",
-            )
-        if len(content) > self.max_bytes:
-            raise IngestionError("file_too_large", "The file exceeds the upload size limit")
 
         if extension == ".md":
             # Markdown keeps its heading-aware chunking and content hash.
@@ -59,6 +50,7 @@ class DocumentAdapter:
         extractor = self._extractors[extension]
         resolved_name, text = extractor(display_name, content)
         return self.plain.prepare(text, resolved_name)
+
 
     def _extract_markdown(self, filename: str, content: bytes) -> tuple[str, str]:
         prepared = self.markdown.prepare(filename, content)
@@ -122,6 +114,22 @@ class DocumentAdapter:
         if not text.strip():
             raise IngestionError("empty_document", "The HTML document produced no extractable text")
         return filename, text
+
+
+def validate_upload_submission(filename: str, content: bytes, max_bytes: int) -> str:
+    """Validate request-level upload properties before an async job is created."""
+    display_name = Path(filename.strip()).name
+    if not display_name:
+        raise IngestionError("validation_error", "Filename cannot be empty")
+    extension = Path(display_name).suffix.lower()
+    if extension not in SUPPORTED_EXTENSIONS:
+        raise IngestionError(
+            "invalid_extension",
+            "Unsupported file type; supported: .md, .txt, .pdf, .docx, .html",
+        )
+    if len(content) > max_bytes:
+        raise IngestionError("file_too_large", "The file exceeds the upload size limit")
+    return display_name
 
 
 def _as_bytes_io(content: bytes):

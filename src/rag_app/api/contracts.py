@@ -156,7 +156,7 @@ class UploadJobCreated(BaseModel):
 
 class UploadJobItemSummary(BaseModel):
     filename: str
-    status: Literal["pending", "processing", "completed", "failed"]
+    status: Literal["pending", "processing", "completed", "failed", "cancelled"]
     code: str | None = None
     message: str | None = None
     progress: list[str] = Field(default_factory=list)
@@ -166,7 +166,7 @@ class UploadJobItemSummary(BaseModel):
 class UploadJobSummary(BaseModel):
     job_id: str
     kb_id: str
-    status: Literal["pending", "processing", "completed"]
+    status: Literal["pending", "processing", "completed", "cancelled"]
     created_at: datetime
     updated_at: datetime
     items: list[UploadJobItemSummary]

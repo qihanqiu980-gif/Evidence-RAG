@@ -4,10 +4,10 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v0.5 |
-| 文档状态 | M8 已完成 |
-| 对应 PRD | `rag-app/docs/PRD.md` v0.5 |
-| 技术阶段 | M8 文档接入增强 |
+| 文档版本 | v0.6 |
+| 文档状态 | M9 已完成 |
+| 对应 PRD | `rag-app/docs/PRD.md` v0.6 |
+| 技术阶段 | M9 异步任务健壮性 |
 
 本文定义 `rag-app` 第一版的模块结构、数据模型、Provider 边界、问答编排、API/SSE 契约、CLI 和测试策略。实现如需偏离本文，应先更新文档并说明原因。
 
@@ -21,7 +21,7 @@
 6. 模型输出非法、引用越权或校验失败时采用 fail-closed 局部拒答。
 7. Chat、Embedding 和 Rerank 通过轻量 Provider Adapter 隔离，不引入 LangChain 或 LangGraph。
 8. 文档格式差异被 Document Adapter 吸收，抽取后的纯文本走与 Markdown 相同的切块、指纹、向量化与检索流程。
-9. 上传采用进程内线程池异步任务，不引入 Celery / Redis；任务状态可随进程重启丢失，属显式取舍。
+9. 上传采用进程内线程池异步任务，不引入 Celery / Redis；任务状态可随进程重启丢失，启动时只清理遗留 spool，属显式取舍。
 10. SQLite、uploads 与 Chroma 是同一个数据面，提供 backup / restore 快照作为迁移前的安全网。
 
 ## 3. 总体架构
@@ -126,6 +126,7 @@ rag-app/
     ├── test_cli.py
     ├── test_backup.py
     ├── test_adapters.py
+    ├── test_jobs.py
     ├── test_pdf.py
     └── test_evaluation.py
 ```
@@ -480,7 +481,17 @@ validate filename and extension
 
 同步端点 `POST /api/knowledge-bases/{kb_id}/documents` 单次最多 20 个文件，逐个独立处理；一个文件失败不影响后续文件。全部成功返回 `201`，部分成功返回 `207`，全部失败按错误类型返回 `400` 或 `503`。
 
-异步端点 `POST /api/knowledge-bases/{kb_id}/documents/async` 立即返回 `202` 与 `job_id`。`UploadJobManager` 使用有界 `ThreadPoolExecutor`（`RAG_APP_UPLOAD_MAX_WORKERS`，1–8）处理批次，并把原始字节先写入 `data/spool/`；任务结束时删除对应 spool 文件。`GET /api/jobs/{job_id}` 返回任务状态、逐文件状态、错误码与阶段进度。job 注册表只在内存中，服务重启后不再可查。
+异步端点 `POST /api/knowledge-bases/{kb_id}/documents/async` 在创建 job 前统一校验数量、文件名、扩展名和单文件大小，全部通过后才把原始字节写入 `data/spool/` 并返回 `202` 与 `job_id`。`UploadJobManager` 使用有界 `ThreadPoolExecutor`（`RAG_APP_UPLOAD_MAX_WORKERS`，1–8）处理批次；任务结束时删除对应 spool 文件。`GET /api/jobs/{job_id}` 返回任务状态、逐文件状态、错误码与阶段进度。job 注册表只在内存中，服务重启后不再可查；`UploadJobManager` 初始化时删除 spool 根目录下的遗留普通文件和符号链接，遇到真实目录跳过、遇到单个删除失败不阻断启动。
+
+取消采用协作式边界：
+
+1. `POST /api/jobs/{job_id}/cancel` 对非终态 job 设置 `cancel_requested` 并返回当前快照。
+2. 尚未开始运行的 job 直接把全部 item 标记为 `cancelled`。
+3. 正在运行的 job 在下一个文件或下一个进度阶段边界停止；`完成` 边界不再抛出取消，避免把已持久化文档误标为取消。
+4. 已完成 item 保留 `completed` 与 document 结果；未开始 item 标记为 `cancelled`。
+5. job 终态为 `completed` 或 `cancelled`，spool 清理幂等。
+
+服务端不保存重试语义。前端“重新提交失败文件”仅使用当前浏览器会话仍持有的 `File` 对象重新调用 async 提交端点，生成一个全新 job。
 
 写入顺序：
 
@@ -646,6 +657,7 @@ compose(validated_parts, decisions) -> FinalAnswer
 - `POST /api/knowledge-bases/{kb_id}/documents/async` → `202 {job_id}`
 - `DELETE /api/knowledge-bases/{kb_id}/documents/{document_id}`
 - `GET /api/jobs/{job_id}` → 任务状态 + 逐文件结果/进度
+- `POST /api/jobs/{job_id}/cancel` → `202` + 当前任务快照
 - `POST /api/knowledge-bases/{kb_id}/import-demo`
 - `POST /api/chat/stream`
 
@@ -671,6 +683,7 @@ compose(validated_parts, decisions) -> FinalAnswer
 | `empty_document` | 400 |
 | `duplicate_document` | 409 |
 | `not_found` | 404 |
+| `upload_not_cancelable` | 409 |
 | `configuration_missing` | 503 |
 | `provider_unavailable` | 503 |
 | `storage_inconsistent` | 500 |
@@ -691,7 +704,7 @@ compose(validated_parts, decisions) -> FinalAnswer
   "limits": {
     "max_files_per_upload": 20,
     "max_file_bytes": 5242880,
-    "accepted_extensions": [".md", ".txt", ".pdf", ".docx", ".html"]
+    "accepted_extensions": [".md", ".txt", ".pdf", ".docx", ".html", ".htm"]
   }
 }
 ```
@@ -718,6 +731,8 @@ compose(validated_parts, decisions) -> FinalAnswer
 约束：
 
 - `DocumentSummary.status` 第一版只有 `ready`。
+- `UploadJobSummary.status` 可为 `pending`、`processing`、`completed`、`cancelled`。
+- `UploadJobItemSummary.status` 可为 `pending`、`processing`、`completed`、`failed`、`cancelled`；取消项使用 `upload_cancelled` 错误码，且 `document=null`。
 - `DocumentBatchResult.documents` 只包含已成功入库的文档。
 - 重复与失败只出现在 `errors` 中，不进入文档列表。
 - `KnowledgeBaseSummary.chunk_count` 由该库 ready 文档累计得出。
@@ -945,8 +960,8 @@ CLI eval 使用 online Provider，需要有效 API Key。Fake Provider 指标回
 
 | 层 | 覆盖 |
 | --- | --- |
-| Unit | 配置、hash、切块、SQLite、Chroma metadata、rerank、多格式抽取 |
-| Integration | 上传（同步 + 异步）、删除、doctor、rebuild、多库过滤、失败补偿、backup / restore |
+| Unit | 配置、hash、切块、SQLite、Chroma metadata、rerank、多格式抽取、spool 启动清理、job 取消边界 |
+| Integration | 上传（同步 + 异步）、提交预检、取消 API、删除、doctor、rebuild、多库过滤、失败补偿、backup / restore |
 | Workflow | 拆分、判定、生成、校验、一次重生成、局部拒答 |
 | API contract | DTO、状态码、错误码、SSE schema、安全输出 |
 | Evaluation | Fake Provider 指标与固定 badcase |
@@ -964,6 +979,8 @@ CLI eval 使用 online Provider，需要有效 API Key。Fake Provider 指标回
 必须覆盖：
 
 - 空、非 `.md`、非 UTF-8、超限文件拒绝。
+- 异步提交前校验空文件名、错误扩展名、超限文件和超量文件，且不创建 job。
+- 排队取消、阶段边界取消、已完成 item 保留和 spool 清理。
 - 换行不同但内容相同的重复拦截。
 - 跨库相同内容允许。
 - 标题路径、超长切块和 overlap。
@@ -989,6 +1006,13 @@ Fake Provider 指标：
 ## 17. 前端对接边界
 
 前端只依赖 API DTO 和 SSE schema，不感知 SQLite、Chroma、Provider、prompt 或本地路径。上传走异步端点：提交后拿到 `job_id`，轮询 `GET /api/jobs/{job_id}` 并把逐文件 `progress` 映射到“校验 / 切块 / 向量化 / 保存 / 完成”阶段展示。
+
+异步上传交互：
+
+- 上传期间调用 `POST /api/jobs/{job_id}/cancel`，请求后继续轮询到 `cancelled` 或 `completed`。
+- job 已并发完成导致 `409 upload_not_cancelable` 时按完成处理，不展示为取消失败。
+- `cancelled` item 渲染为“已取消 / 未入库”，已完成 item 继续展示文档结果。
+- 失败项保留浏览器内存中的 `File` 引用；“重新提交失败文件”只把匹配的失败文件再次提交到 async 端点，生成新 job，不在服务端保存重试状态。
 
 前端状态：
 
@@ -1052,7 +1076,7 @@ idle
 ## 20. 后续演进
 
 - 网页抓取 / 浏览器采集与 OCR（当前只支持已上传的 PDF / Word / HTML 文件）。
-- 异步 job 持久化、取消、去重预检与失败重试（当前 job 仅存在于内存）。
+- 异步 job 持久化（当前取消与前端重试已实现，但 job 仍仅存在于内存）。
 - 关键词与向量混合检索。
 - 场景路由与多个 workflow。
 - 会话持久化与隐私清理。

@@ -11,6 +11,7 @@ import {
   listKnowledgeBases,
   uploadDocumentsAsync,
   getUploadJob,
+  cancelUploadJob,
 } from './api'
 import { Badge, Icon, Modal, PageHeading } from './ui'
 import type { DocumentSummary, KnowledgeBase, SystemStatus, UploadJobSummary } from './types'
@@ -19,7 +20,7 @@ type Page = 'overview' | 'knowledge' | 'chat'
 type PendingDelete =
   | { kind: 'knowledge'; knowledgeBaseId: string }
   | { kind: 'document'; knowledgeBaseId: string; documentId: string }
-type UploadOutcome = 'success' | 'duplicate' | 'failed'
+type UploadOutcome = 'success' | 'duplicate' | 'failed' | 'cancelled'
 type UploadEntry = {
   key: string
   filename: string
@@ -69,7 +70,12 @@ const batchEntries = (result: {
   ...result.errors.map((item) => ({
     key: `error-${item.filename}-${crypto.randomUUID()}`,
     filename: item.filename,
-    outcome: item.code === 'duplicate_document' ? ('duplicate' as const) : ('failed' as const),
+    outcome:
+      item.code === 'duplicate_document'
+        ? ('duplicate' as const)
+        : item.code === 'upload_cancelled'
+          ? ('cancelled' as const)
+          : ('failed' as const),
     message: item.message,
     progress: [],
   })),
@@ -82,6 +88,8 @@ const jobEntries = (job: UploadJobSummary): UploadEntry[] =>
     outcome:
       item.status === 'completed'
         ? ('success' as const)
+        : item.status === 'cancelled'
+          ? ('cancelled' as const)
         : item.code === 'duplicate_document'
           ? ('duplicate' as const)
           : ('failed' as const),
@@ -90,7 +98,11 @@ const jobEntries = (job: UploadJobSummary): UploadEntry[] =>
         ? '已完成入库'
         : item.status === 'failed'
           ? (item.message ?? '入库失败')
-          : '处理中',
+          : item.status === 'cancelled'
+            ? (item.message ?? '已取消，未入库')
+            : item.status === 'pending' || item.status === 'processing'
+              ? '处理中'
+              : '处理中',
     progress: item.progress,
   }))
 
@@ -131,8 +143,13 @@ export default function App() {
   const [deleteError, setDeleteError] = useState<string>()
   const [uploading, setUploading] = useState(false)
   const [uploadEntries, setUploadEntries] = useState<UploadEntry[]>()
+  const [activeJobId, setActiveJobId] = useState<string>()
+  const [cancelRequested, setCancelRequested] = useState(false)
+  const [cancelError, setCancelError] = useState<string>()
   const fileRef = useRef<HTMLInputElement>(null)
   const activeIdRef = useRef<string | undefined>(undefined)
+  const retryFilesRef = useRef<File[]>([])
+  const retryKbIdRef = useRef<string | undefined>(undefined)
 
   activeIdRef.current = activeId
 
@@ -174,10 +191,13 @@ export default function App() {
   const acceptedExtensions = status?.limits.accepted_extensions ?? ['.md']
 
   const runBatch = async (
-    entries: { filename: string; outcome: 'failed'; message: string }[],
+    entries: Pick<UploadEntry, 'filename' | 'outcome' | 'message'>[],
     action: () => Promise<{ documents: { filename: string; progress: string[] }[]; errors: { filename: string; code: string; message: string }[] }>,
   ) => {
     setUploading(true)
+    setActiveJobId(undefined)
+    setCancelRequested(false)
+    setCancelError(undefined)
     setUploadEntries(
       entries.length > 0
         ? entries.map((item) => ({
@@ -211,7 +231,51 @@ export default function App() {
       )
     } finally {
       setUploading(false)
+      setActiveJobId(undefined)
+      setCancelRequested(false)
     }
+  }
+
+  const submitFiles = async (valid: File[], invalid: UploadEntry[]) => {
+    if (!active || uploading || operationsDisabled || valid.length === 0) return
+    retryFilesRef.current = valid
+    retryKbIdRef.current = active.id
+    const localEntries = valid.map((file) => ({
+      filename: file.name,
+      outcome: 'failed' as const,
+      message: '已提交，等待服务端返回最终入库结果',
+    }))
+
+    await runBatch([...localEntries, ...invalid], async () => {
+      const { job_id: jobId } = await uploadDocumentsAsync(active.id, valid)
+      setActiveJobId(jobId)
+
+      let job: UploadJobSummary | undefined
+      const deadline = Date.now() + 60_000
+      while (Date.now() < deadline) {
+        job = await getUploadJob(jobId)
+        if (job.status === 'completed' || job.status === 'cancelled') break
+        setUploadEntries(jobEntries(job))
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      if (!job || (job.status !== 'completed' && job.status !== 'cancelled')) {
+        throw new ApiError('timeout', '入库超时，请稍后刷新查看文档状态。')
+      }
+      return {
+        documents: job.items
+          .filter((item) => item.status === 'completed')
+          .map((item) => ({ filename: item.filename, progress: item.progress })),
+        errors: job.items
+          .filter((item) => item.status !== 'completed')
+          .map((item) => ({
+            filename: item.filename,
+            code: item.code ?? (item.status === 'cancelled' ? 'upload_cancelled' : 'failed'),
+            message:
+              item.message ??
+              (item.status === 'cancelled' ? '已取消，未入库' : '入库失败'),
+          })),
+      }
+    })
   }
 
   const onPickFiles = async (files: FileList | null) => {
@@ -270,33 +334,37 @@ export default function App() {
       return
     }
 
-    const localEntries = valid.map((file) => ({
-      filename: file.name,
-      outcome: 'failed' as const,
-      message: '已提交，等待服务端返回最终入库结果',
-    }))
-    await runBatch([...localEntries, ...invalid], async () => {
-      const { job_id } = await uploadDocumentsAsync(active.id, valid)
-      let job: UploadJobSummary | undefined
-      const deadline = Date.now() + 60_000
-      while (Date.now() < deadline) {
-        job = await getUploadJob(job_id)
-        if (job.status === 'completed') break
-        setUploadEntries(jobEntries(job))
-        await new Promise((resolve) => setTimeout(resolve, 500))
+    await submitFiles(
+      valid,
+      invalid.map((item) => ({ ...item, key: `invalid-${crypto.randomUUID()}`, progress: [] })),
+    )
+  }
+
+  const cancelJob = async () => {
+    if (!activeJobId || cancelRequested) return
+    try {
+      await cancelUploadJob(activeJobId)
+      setCancelRequested(true)
+      setCancelError(undefined)
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'upload_not_cancelable') {
+        setCancelRequested(true)
+        return
       }
-      if (!job || job.status !== 'completed') {
-        throw new ApiError('timeout', '入库超时，请稍后刷新查看文档状态。')
-      }
-      return {
-        documents: job.items
-          .filter((item) => item.status === 'completed')
-          .map((item) => ({ filename: item.filename, progress: item.progress })),
-        errors: job.items
-          .filter((item) => item.status === 'failed')
-          .map((item) => ({ filename: item.filename, code: item.code ?? 'failed', message: item.message ?? '入库失败' })),
-      }
-    })
+      setCancelError(error instanceof ApiError ? error.message : '取消请求失败，请稍后重试。')
+    }
+  }
+
+  const retryFailedFiles = async () => {
+    if (!active || uploading || operationsDisabled) return
+    const failedNames = new Set(
+      (uploadEntries ?? [])
+        .filter((entry) => entry.outcome === 'failed')
+        .map((entry) => entry.filename),
+    )
+    const files = retryFilesRef.current.filter((file) => failedNames.has(file.name))
+    if (files.length === 0 || retryKbIdRef.current !== active.id) return
+    await submitFiles(files, [])
   }
 
   const create = async () => {
@@ -367,6 +435,15 @@ export default function App() {
   const pendingKnowledgeBase = bases.find(
     (base) => pendingDelete?.kind === 'knowledge' && base.id === pendingDelete.knowledgeBaseId,
   )
+  const failedUploadNames = new Set(
+    (uploadEntries ?? [])
+      .filter((entry) => entry.outcome === 'failed')
+      .map((entry) => entry.filename),
+  )
+  const retryableFiles =
+    active && retryKbIdRef.current === active.id
+      ? retryFilesRef.current.filter((file) => failedUploadNames.has(file.name))
+      : []
   const pendingDocument =
     pendingDelete?.kind === 'document'
       ? documents.find((document) => document.id === pendingDelete.documentId)
@@ -608,6 +685,17 @@ export default function App() {
                             <Icon name="upload" size={16} />
                             上传文档
                           </button>
+                          {activeJobId && (
+                            <button
+                              type="button"
+                              className="btn btn-danger"
+                              onClick={() => void cancelJob()}
+                              disabled={!uploading || cancelRequested}
+                            >
+                              <Icon name="close" size={16} />
+                              {cancelRequested ? '取消中…' : '取消上传'}
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="btn btn-danger"
@@ -647,16 +735,38 @@ export default function App() {
                                 ，未入库{' '}
                                 {uploadEntries.filter((item) => item.outcome !== 'success').length}
                               </p>
+                              {cancelError && (
+                                <p className="m-0 mt-1 text-[13px] text-[var(--danger)]">
+                                  {cancelError}
+                                </p>
+                              )}
                             </div>
-                            <button
-                              type="button"
-                              className="icon-btn"
-                              aria-label="关闭入库结果"
-                              title="关闭入库结果"
-                              onClick={() => setUploadEntries(undefined)}
-                            >
-                              <Icon name="close" size={16} />
-                            </button>
+                            <div className="flex flex-wrap items-center gap-2">
+                              {!uploading && retryableFiles.length > 0 && (
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  onClick={() => void retryFailedFiles()}
+                                >
+                                  <Icon name="refresh" size={16} />
+                                  重新提交失败文件
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                aria-label="关闭入库结果"
+                                title="关闭入库结果"
+                                onClick={() => {
+                                  setUploadEntries(undefined)
+                                  retryFilesRef.current = []
+                                  retryKbIdRef.current = undefined
+                                  setCancelError(undefined)
+                                }}
+                              >
+                                <Icon name="close" size={16} />
+                              </button>
+                            </div>
                           </div>
                           <ul className="m-0 list-none p-0">
                             {uploadEntries.map((entry) => {
@@ -666,6 +776,8 @@ export default function App() {
                                   ? ('ok' as const)
                                   : entry.outcome === 'duplicate'
                                     ? ('warn' as const)
+                                    : entry.outcome === 'cancelled'
+                                      ? ('neutral' as const)
                                     : processing
                                       ? ('neutral' as const)
                                       : ('danger' as const)
@@ -674,6 +786,8 @@ export default function App() {
                                   ? '已就绪'
                                   : entry.outcome === 'duplicate'
                                     ? '重复文档'
+                                    : entry.outcome === 'cancelled'
+                                      ? '已取消'
                                     : processing
                                       ? '处理中'
                                       : '未入库'

@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..config import Settings
+from ..core.adapters import validate_upload_submission
 from ..core.jobs import UploadJobSnapshot
 from ..core.workflow import WorkflowEvent
 from ..errors import RagAppError
@@ -110,7 +111,7 @@ def build_app(
             limits=UploadLimits(
                 max_files_per_upload=settings.upload_max_files,
                 max_file_bytes=settings.upload_max_bytes,
-                accepted_extensions=[".md", ".txt", ".pdf", ".docx", ".html"],
+                accepted_extensions=[".md", ".txt", ".pdf", ".docx", ".html", ".htm"],
             ),
         )
 
@@ -188,12 +189,33 @@ def build_app(
 
         pending: list[tuple[str, bytes]] = []
         for upload in files:
-            pending.append((upload.filename or "unnamed", await upload.read()))
+            content = await upload.read()
+            filename = validate_upload_submission(
+                upload.filename or "",
+                content,
+                settings.upload_max_bytes,
+            )
+            pending.append((filename, content))
         job_id = container.jobs.submit(kb_id, pending, container.manager.ingest)
         return UploadJobCreated(job_id=job_id)
 
     @app.get("/api/jobs/{job_id}", response_model=UploadJobSummary)
     def get_upload_job(job_id: str) -> UploadJobSummary:
+        snapshot = container.jobs.snapshot(job_id)
+        if snapshot is None:
+            raise _DomainResponse("not_found", "Upload job not found")
+        return _job_summary(snapshot)
+
+    @app.post(
+        "/api/jobs/{job_id}/cancel",
+        response_model=UploadJobSummary,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def cancel_upload_job(job_id: str) -> UploadJobSummary:
+        if container.jobs.snapshot(job_id) is None:
+            raise _DomainResponse("not_found", "Upload job not found")
+        if not container.jobs.cancel(job_id):
+            raise _DomainResponse("upload_not_cancelable", "Upload job is already finished")
         snapshot = container.jobs.snapshot(job_id)
         if snapshot is None:
             raise _DomainResponse("not_found", "Upload job not found")
@@ -297,6 +319,10 @@ def build_app(
 
 class _DomainResponse(RagAppError):
     """Trigger FastAPI's shared domain-error response."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _job_summary(snapshot: UploadJobSnapshot) -> UploadJobSummary:
@@ -418,6 +444,8 @@ def _error_status(code: str) -> int:
     }:
         return status.HTTP_400_BAD_REQUEST
     if code in {"duplicate_knowledge_base", "duplicate_document"}:
+        return status.HTTP_409_CONFLICT
+    if code == "upload_not_cancelable":
         return status.HTTP_409_CONFLICT
     if code == "not_found":
         return status.HTTP_404_NOT_FOUND

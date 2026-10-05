@@ -47,7 +47,12 @@ export type DocumentBatchResult = {
   errors: DocumentUploadError[]
 }
 
-export type UploadJobItemStatus = 'pending' | 'processing' | 'completed' | 'failed'
+export type UploadJobItemStatus =
+  | 'pending'
+  | 'processing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
 
 export type UploadJobItem = {
   filename: string
@@ -61,7 +66,7 @@ export type UploadJobItem = {
 export type UploadJobSummary = {
   job_id: string
   kb_id: string
-  status: 'pending' | 'processing' | 'completed'
+  status: 'pending' | 'processing' | 'completed' | 'cancelled'
   created_at: string
   updated_at: string
   items: UploadJobItem[]
