@@ -57,7 +57,7 @@
 **问答**
 
 - 问题按需拆成最多 5 个子问题，分别检索、分别判定
-- Chroma 向量召回 + `qwen3-rerank` 重排
+- SQLite FTS5 关键词召回 + Chroma 向量召回，RRF 融合后经 `qwen3-rerank` 重排
 - 证据分级：回答证据 / 相关但不足以回答
 - 生成后校验引用、数字与证据边界；失败部分携带原因重生成一次
 - SSE 实时返回拆解、检索、判定、生成、校验每个阶段的状态
@@ -65,20 +65,26 @@
 **运维**
 
 - `doctor` 数据面体检、`rebuild` 向量重建、`backup` / `restore` 一键快照回滚
-- 固定 14 条评测集与 online 基线；89 个自动化测试不访问网络
+- 固定 14 条评测集与 online 基线（含 MRR / 引用准确率 / 忠实度）；94 个自动化测试不访问网络
 - Provider 指数退避重试；启动时安全清理残留任务文件
 
-## 一图看懂链路
+## 工作原理
 
-```text
-入库：上传 → 预检 → 抽取文本 → 切块/指纹 → 向量化 → SQLite + Chroma
-问答：提问 → 拆解 → 召回 → 重排 → 证据判定 → 生成 → 校验 → SSE 输出
-```
+**入库**
 
-两条规则记住就够了：
+1. **上传文件** — 提交即返回任务号，前端轮询逐文件进度
+2. **提交预检** — 文件名 / 类型 / 大小 / 数量不合法直接拒绝，不落盘
+3. **抽取文本** — Markdown、TXT、PDF、DOCX、HTML 统一为纯文本
+4. **切块与指纹** — 统一边界切块，SHA-256 摘要在向量化前拦截重复
+5. **写入数据面** — 向量化进 Chroma，元数据与原文进 SQLite 和 uploads
 
-1. 证据不足的子问题直接拒答（fail-closed）；
-2. 校验失败的部分重新生成一次，仍失败就不作为已验证答案输出。
+**问答**
+
+1. **拆解问题** — 按需拆为最多 5 个子问题，分别检索、分别判定
+2. **召回与重排** — 向量召回候选，`qwen3-rerank` 重排后保留 Top-K
+3. **证据判定** — 区分“回答证据”与“相关但不足以回答”
+4. **生成答案** — 只使用判定为证据的内容，其余部分局部拒答
+5. **校验输出** — 核对引用与数字；失败重生成一次，仍失败不作为已验证答案
 
 ## 技术栈
 
@@ -121,6 +127,8 @@ cd frontend && pnpm install && pnpm run build && cd ..
 | `RAG_APP_DATA_DIR` | `data` | SQLite / uploads / Chroma / spool 根目录 |
 | `RAG_APP_CHUNK_SIZE` / `CHUNK_OVERLAP` | `800` / `100` | 切块大小与重叠 |
 | `RAG_APP_RETRIEVAL_TOP_K` | `7` | 每个子问题重排后保留的候选数 |
+| `RAG_APP_HYBRID_RETRIEVAL` | `true` | 关键词 + 向量混合检索开关 |
+| `RAG_APP_RETRIEVAL_VECTOR_WEIGHT` / `KEYWORD_WEIGHT` / `RRF_K` | `1.0` / `1.0` / `60` | RRF 融合权重与平滑常数 |
 
 上传限额、并发、重试、日志、评测成本单价等完整变量见 [`.env.example`](.env.example)。
 
@@ -137,13 +145,13 @@ cd frontend && pnpm run build && pnpm run test:e2e
 
 常用 CLI：`rag-app serve | doctor | rebuild | eval | backup | restore`
 
-评测：`.venv/bin/rag-app eval --dataset eval/cases.jsonl --top-k 7`。当前 online 基线 **14/14 通过**，检索命中率与拒答预期通过率均为 **100%**，记录见 [`eval/baselines/`](eval/baselines/)。
+评测：`.venv/bin/rag-app eval --dataset eval/cases.jsonl --top-k 7`。当前 online 基线 **14/14 通过**，检索命中率与拒答预期通过率均为 **100%**，并输出 MRR、引用准确率与忠实度，记录见 [`eval/baselines/`](eval/baselines/)。
 
 ## 边界与计划
 
 当前限制：本地单用户无鉴权；任务状态在内存中、服务重启后不保证可查；会话历史只在当前页面；失败文件重提依赖浏览器内存中的 `File` 对象；模型能力依赖外部接口与网络。
 
-后续计划：关键词 + 向量混合检索，补充 MRR、引用准确率与忠实度；会话持久化、API 鉴权与限流；如需跨重启任务状态，再评估专用持久化方案。
+后续计划：会话持久化、API 鉴权与限流；扩展 chunk 级相关性标注与分领域评测集；如需跨重启任务状态，再评估专用持久化方案。
 
 ## 更多文档
 
