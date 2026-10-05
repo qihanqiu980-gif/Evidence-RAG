@@ -28,6 +28,12 @@
 > 数据（SQLite、原始文件、向量索引）全部保存在本机；模型调用走在线 OpenAI 兼容接口。这是一个本地单用户 MVP，不按生产级 SaaS 设计。
 
 <p align="center">
+  <img src="docs/screenshots/overview.png" alt="工作台概览页面" width="960" />
+</p>
+
+<p align="center"><sub>概览：运行配置与本地存储统计</sub></p>
+
+<p align="center">
   <img src="docs/screenshots/knowledge-base.png" alt="知识库管理页面" width="960" />
 </p>
 
@@ -38,12 +44,6 @@
 </p>
 
 <p align="center"><sub>证据问答：回答引用、执行过程与原文证据同屏核对</sub></p>
-
-<p align="center">
-  <img src="docs/screenshots/overview.png" alt="工作台概览页面" width="960" />
-</p>
-
-<p align="center"><sub>概览：运行配置与本地存储统计</sub></p>
 
 ## 核心能力
 
@@ -70,21 +70,10 @@
 
 ## 工作原理
 
-**入库**
-
-1. **上传文件** — 提交即返回任务号，前端轮询逐文件进度
-2. **提交预检** — 文件名 / 类型 / 大小 / 数量不合法直接拒绝，不落盘
-3. **抽取文本** — Markdown、TXT、PDF、DOCX、HTML 统一为纯文本
-4. **切块与指纹** — 统一边界切块，SHA-256 摘要在向量化前拦截重复
-5. **写入数据面** — 向量化进 Chroma，元数据与原文进 SQLite 和 uploads
-
-**问答**
-
-1. **拆解问题** — 按需拆为最多 5 个子问题，分别检索、分别判定
-2. **召回与重排** — 向量召回候选，`qwen3-rerank` 重排后保留 Top-K
-3. **证据判定** — 区分“回答证据”与“相关但不足以回答”
-4. **生成答案** — 只使用判定为证据的内容，其余部分局部拒答
-5. **校验输出** — 核对引用与数字；失败重生成一次，仍失败不作为已验证答案
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagram/numbered-steps-dark.svg" />
+  <img src="docs/diagram/numbered-steps-light.svg" alt="工作原理编号步骤图：入库五步为上传、预检、抽取、切块指纹、写入数据面；问答五步为拆解、召回重排、证据判定、生成、校验输出。" width="920" />
+</picture>
 
 ## 技术栈
 
