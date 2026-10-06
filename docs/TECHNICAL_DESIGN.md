@@ -4,16 +4,16 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v0.6 |
-| 文档状态 | M9 已完成 |
-| 对应 PRD | `rag-app/docs/PRD.md` v0.6 |
-| 技术阶段 | M9 异步任务健壮性 |
+| 文档版本 | v0.7 |
+| 文档状态 | M10 已完成 |
+| 对应 PRD | `rag-app/docs/PRD.md` v0.7 |
+| 技术阶段 | M10 检索质量增强 |
 
 本文定义 `rag-app` 第一版的模块结构、数据模型、Provider 边界、问答编排、API/SSE 契约、CLI 和测试策略。实现如需偏离本文，应先更新文档并说明原因。
 
 ## 2. 设计原则
 
-1. SQLite 和 uploads 是业务事实；Chroma 是可重建的派生索引。
+1. SQLite 和 uploads 是业务事实；Chroma 与 SQLite FTS5 关键词索引是可重建的派生索引。
 2. 产品只有 online 运行模式；模型配置缺失时禁用入库与问答，不降级为本地规则模式。
 3. 自动化测试通过 Fake Provider 与临时数据目录获得确定性，不依赖网络。
 4. 知识证据问答内部固定执行拆分、检索、重排、语义判定、生成和校验。
@@ -169,6 +169,10 @@ RAG_APP_CHUNK_SIZE=800
 RAG_APP_CHUNK_OVERLAP=100
 RAG_APP_RETRIEVAL_TOP_K=7
 RAG_APP_CANDIDATE_MULTIPLIER=20
+RAG_APP_HYBRID_RETRIEVAL=true
+RAG_APP_RETRIEVAL_VECTOR_WEIGHT=1.0
+RAG_APP_RETRIEVAL_KEYWORD_WEIGHT=1.0
+RAG_APP_RETRIEVAL_RRF_K=60
 RAG_APP_MAX_SUBQUESTIONS=5
 
 RAG_APP_REQUEST_TIMEOUT_SECONDS=60
@@ -351,9 +355,41 @@ metadata:
   schema_version
 ```
 
-检索时使用 `where kb_id $in selected_kb_ids`，候选数为 `top_k * candidate_multiplier`，默认 `7 * 20 = 140`。相似度展示值使用 `1 - cosine_distance`，重排分数来自 Provider。
+向量召回使用 `where kb_id $in selected_kb_ids`，候选数为 `top_k * candidate_multiplier`，默认 `7 * 20 = 140`。相似度展示值使用 `1 - cosine_distance`，重排分数来自 Provider。
 
 删除文档按 `document_id` 删除向量，删除知识库按 `kb_id` 删除向量。Chroma 删除幂等。
+
+### 8.4 关键词索引与混合检索
+
+SQLite 内维护 `chunks_fts` 虚拟表：
+
+```sql
+CREATE VIRTUAL TABLE chunks_fts USING fts5(
+    chunk_id UNINDEXED,
+    content,
+    tokenize='trigram'
+);
+```
+
+设计要点：
+
+- FTS 索引与 Chroma 一样是派生索引，不 bump 业务 schema 版本，旧备份恢复后可自动重建。
+- `SQLiteStore` 初始化时幂等创建索引；索引行数与 chunks 不一致时自动全量重建。
+- 文档写入、删除文档和删除知识库在同一个 SQLite 事务内同步维护 FTS 行。
+- doctor 输出 `keyword_index` 计数；与 chunks 不一致时报告 `keyword_index_count_mismatch`。
+- 查询侧使用 trigram BM25：ASCII / 数字 token 取长度 ≥3 的词；中文连续序列切为 3-gram；长度不足 3 的短词用 `instr` 子串兜底召回。
+
+混合检索流程：
+
+```text
+vector candidates (Chroma, candidate_limit)
+keyword candidates (FTS5 BM25, candidate_limit)
+→ weighted RRF fusion
+→ provider rerank
+→ top_k evidence
+```
+
+RRF 公式为 `score(chunk) = Σ weight_source / (rrf_k + rank_source)`，默认 `rrf_k=60`，两路权重均为 1.0。`RAG_APP_HYBRID_RETRIEVAL=false` 时完全关闭关键词召回，保持 M9 及之前的纯向量行为。仅存在于关键词结果中的 chunk，向量相似度展示值记为 0.0。
 
 ## 9. Provider Adapter
 
@@ -937,7 +973,17 @@ CLI eval 使用 online Provider，需要有效 API Key。Fake Provider 指标回
 | `expected_document_prefixes` | 期望命中的文档名前缀列表 |
 | `expected_refusal` | `none`、`partial` 或 `all` |
 
-评测输出检索命中率、拒答期望通过率、总体通过率、证据范围泄漏数量、case 与汇总延迟、token usage、可选估算成本，以及 Provider 重试 / 失败统计。延迟使用本地单调时钟；成本只基于供应商 usage 与 `.env` 中配置的每 1K token 单价。输出不包含完整答案、提示词、API Key 或本地路径。默认评测所有本地知识库，也可通过重复 `--kb-id` 指定范围。
+评测输出检索命中率、MRR、拒答期望通过率、总体通过率、证据范围泄漏数量、引用准确率、忠实度、case 与汇总延迟、token usage、可选估算成本，以及 Provider 重试 / 失败统计。延迟使用本地单调时钟；成本只基于供应商 usage 与 `.env` 中配置的每 1K token 单价。输出不包含完整答案、提示词、API Key 或本地路径。默认评测所有本地知识库，也可通过重复 `--kb-id` 指定范围。
+
+M10 新增指标定义：
+
+| 指标 | 定义 | 适用范围 |
+| --- | --- | --- |
+| `retrieval_mrr` | 最终证据列表中首条命中期望文档前缀的排名取倒数，未命中计 0，按 case 平均 | 配置了 `expected_document_prefixes` 的用例 |
+| `citation_accuracy` | verified part 的引用指向期望文档前缀证据的比例；引用不存在或不属于期望文档计为不准确 | 全部含引用的回答 |
+| `faithfulness_rate` | 独立 `faithfulness` judge（chat JSON）逐 part 判断回答是否完全由其引用证据支持；调用失败或输出非法按不支持计 | 全部 verified 且非空回答 |
+
+忠实度 judge 与工作流内置 validate 相互独立：eval 使用单独的 system prompt 与 `task="faithfulness"`，其耗时与 token 计入该 case 的评测统计，但暂不计入 `passed` 判定，作为独立质量观测指标。引用准确率是文档前缀级别的严格口径：引用相关但非期望文档的证据会被计为不准确，用于检索对比而非人工评分替代。
 
 ## 15. 日志与安全
 
@@ -1077,8 +1123,7 @@ idle
 
 - 网页抓取 / 浏览器采集与 OCR（当前只支持已上传的 PDF / Word / HTML 文件）。
 - 异步 job 持久化（当前取消与前端重试已实现，但 job 仍仅存在于内存）。
-- 关键词与向量混合检索。
 - 场景路由与多个 workflow。
 - 会话持久化与隐私清理。
 - API 版本化、认证和限流。
-- MRR、引用准确率、忠实度、延迟和成本统计。
+- 更细粒度的检索评测（chunk 级相关性标注、多查询集与分领域基线）。

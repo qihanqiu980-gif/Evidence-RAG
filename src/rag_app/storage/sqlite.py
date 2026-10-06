@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -20,6 +22,19 @@ from ..models import Chunk, Document, DocumentStatus, KnowledgeBase, VectorColle
 SCHEMA_VERSION = 1
 
 
+@dataclass(frozen=True, slots=True)
+class KeywordMatch:
+    chunk_id: str
+    kb_id: str
+    document_id: str
+    document_name: str
+    heading_path: tuple[str, ...]
+    chunk_index: int
+    content: str
+    content_hash: str
+    keyword_score: float
+
+
 class SQLiteStore:
     """SQLite business-fact storage with explicit, versioned migrations."""
 
@@ -27,6 +42,7 @@ class SQLiteStore:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
+        self._ensure_keyword_index()
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=30)
@@ -246,6 +262,10 @@ class SQLiteStore:
                         for chunk in chunks
                     ],
                 )
+                connection.executemany(
+                    "INSERT INTO chunks_fts(chunk_id, content) VALUES (?, ?)",
+                    [(chunk.id, chunk.content) for chunk in chunks],
+                )
         except sqlite3.IntegrityError as exc:
             if "UNIQUE" in str(exc):
                 raise DuplicateDocumentError(
@@ -294,6 +314,15 @@ class SQLiteStore:
 
     def delete_document(self, kb_id: str, document_id: str) -> None:
         with self.transaction() as connection:
+            connection.execute(
+                """
+                DELETE FROM chunks_fts
+                WHERE chunk_id IN (
+                    SELECT id FROM chunks WHERE kb_id = ? AND document_id = ?
+                )
+                """,
+                (kb_id, document_id),
+            )
             cursor = connection.execute(
                 "DELETE FROM documents WHERE kb_id = ? AND id = ?",
                 (kb_id, document_id),
@@ -303,6 +332,13 @@ class SQLiteStore:
 
     def delete_knowledge_base(self, kb_id: str) -> None:
         with self.transaction() as connection:
+            connection.execute(
+                """
+                DELETE FROM chunks_fts
+                WHERE chunk_id IN (SELECT id FROM chunks WHERE kb_id = ?)
+                """,
+                (kb_id,),
+            )
             cursor = connection.execute(
                 "DELETE FROM knowledge_bases WHERE id = ?",
                 (kb_id,),
@@ -491,6 +527,112 @@ class SQLiteStore:
             ).fetchall()
         return [_vector_collection_from_row(row) for row in rows]
 
+    def keyword_index_count(self) -> int:
+        with self.connect() as connection:
+            return int(
+                connection.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+            )
+
+    def rebuild_keyword_index(self) -> None:
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM chunks_fts")
+            connection.execute(
+                "INSERT INTO chunks_fts(chunk_id, content) "
+                "SELECT id, content FROM chunks"
+            )
+
+    def search_keyword(
+        self,
+        query: str,
+        kb_ids: Sequence[str],
+        limit: int,
+    ) -> list[KeywordMatch]:
+        """Rank chunks by trigram BM25 plus substring fallback for short terms."""
+        if not kb_ids or limit <= 0:
+            return []
+        fts_terms, substring_terms = _keyword_terms(query)
+        if not fts_terms and not substring_terms:
+            return []
+
+        selected = list(dict.fromkeys(kb_ids))
+        placeholders = ", ".join("?" for _ in selected)
+        scores: dict[str, float] = {}
+        rows: dict[str, sqlite3.Row] = {}
+
+        if fts_terms:
+            match = " OR ".join(f'"{term}"' for term in fts_terms)
+            sql = f"""
+                SELECT c.id, c.document_id, c.kb_id, d.filename,
+                       c.heading_path, c.chunk_index, c.content, c.content_hash,
+                       bm25(chunks_fts) AS keyword_score
+                FROM chunks_fts
+                JOIN chunks c ON c.id = chunks_fts.chunk_id
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.kb_id IN ({placeholders}) AND chunks_fts MATCH ?
+                ORDER BY keyword_score
+                LIMIT ?
+            """
+            parameters = [*selected, match, limit]
+            with self.connect() as connection:
+                for row in connection.execute(sql, parameters).fetchall():
+                    scores[row["id"]] = scores.get(row["id"], 0.0) + float(
+                        row["keyword_score"]
+                    )
+                    rows[row["id"]] = row
+
+        for term in substring_terms:
+            sql = f"""
+                SELECT c.id, c.document_id, c.kb_id, d.filename,
+                       c.heading_path, c.chunk_index, c.content, c.content_hash,
+                       -(length(c.content) - length(replace(c.content, ?, '')))
+                          / max(length(?), 1) AS keyword_score
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.kb_id IN ({placeholders}) AND instr(c.content, ?) > 0
+            """
+            parameters = [term, term, *selected, term]
+            with self.connect() as connection:
+                for row in connection.execute(sql, parameters).fetchall():
+                    scores[row["id"]] = scores.get(row["id"], 0.0) + float(
+                        row["keyword_score"]
+                    )
+                    rows[row["id"]] = row
+
+        ranked = sorted(scores.items(), key=lambda item: (item[1], item[0]))[:limit]
+        return [
+            KeywordMatch(
+                chunk_id=chunk_id,
+                kb_id=rows[chunk_id]["kb_id"],
+                document_id=rows[chunk_id]["document_id"],
+                document_name=rows[chunk_id]["filename"],
+                heading_path=tuple(json.loads(rows[chunk_id]["heading_path"])),
+                chunk_index=int(rows[chunk_id]["chunk_index"]),
+                content=rows[chunk_id]["content"],
+                content_hash=rows[chunk_id]["content_hash"],
+                keyword_score=score,
+            )
+            for chunk_id, score in ranked
+        ]
+
+    def _ensure_keyword_index(self) -> None:
+        try:
+            with self.transaction() as connection:
+                connection.execute(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                        chunk_id UNINDEXED,
+                        content,
+                        tokenize='trigram'
+                    )
+                    """
+                )
+            if self.keyword_index_count() != self.counts()[2]:
+                self.rebuild_keyword_index()
+        except sqlite3.OperationalError as exc:
+            raise StorageInconsistentError(
+                "SQLite FTS5 is unavailable for the keyword index"
+            ) from exc
+
     @staticmethod
     def _validate_uuid(value: str, label: str) -> None:
         try:
@@ -583,4 +725,30 @@ def _vector_collection_values(collection: VectorCollection) -> tuple[object, ...
         _iso(collection.created_at),
         _iso(collection.activated_at) if collection.activated_at else None,
         _iso(collection.retired_at) if collection.retired_at else None,
+    )
+
+
+def _keyword_terms(query: str) -> tuple[list[str], list[str]]:
+    """Split a query into trigram MATCH terms and short substring terms."""
+    normalized = query.casefold()
+    fts_terms: list[str] = []
+    substring_terms: list[str] = []
+
+    for token in re.findall(r"[a-z0-9]+", normalized):
+        if len(token) >= 3:
+            fts_terms.append(token)
+        elif token:
+            substring_terms.append(token)
+
+    for sequence in re.findall(r"[\u4e00-\u9fff]+", normalized):
+        if len(sequence) < 3:
+            substring_terms.append(sequence)
+            continue
+        fts_terms.extend(
+            sequence[start : start + 3] for start in range(len(sequence) - 2)
+        )
+
+    return (
+        list(dict.fromkeys(fts_terms)),
+        list(dict.fromkeys(substring_terms)),
     )

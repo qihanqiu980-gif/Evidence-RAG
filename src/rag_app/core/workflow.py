@@ -12,6 +12,7 @@ from ..config import Settings
 from ..errors import ProviderResponseError
 from ..providers.base import ModelProvider
 from ..storage.chroma import ChromaVectorStore
+from ..storage.sqlite import SQLiteStore
 from .retrieval import (
     Evidence,
     EvidenceRetriever,
@@ -94,10 +95,11 @@ class EvidenceQAWorkflow:
         settings: Settings,
         vectors: ChromaVectorStore,
         provider: ModelProvider,
+        sqlite: SQLiteStore,
     ) -> None:
         self.settings = settings
         self.provider = provider
-        self.retriever = EvidenceRetriever(settings, vectors, provider)
+        self.retriever = EvidenceRetriever(settings, vectors, provider, sqlite)
 
     def stream(
         self,

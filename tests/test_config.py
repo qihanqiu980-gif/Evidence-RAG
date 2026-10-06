@@ -80,3 +80,37 @@ def test_retry_stability_settings_are_validated(tmp_path):
 
     with pytest.raises(ConfigurationError):
         Settings.from_env(tmp_path, {"RAG_APP_RETRY_BACKOFF_SECONDS": "10.1"})
+
+
+def test_hybrid_retrieval_settings_are_validated(tmp_path):
+    settings = Settings.from_env(
+        tmp_path,
+        {
+            "RAG_APP_HYBRID_RETRIEVAL": "false",
+            "RAG_APP_RETRIEVAL_VECTOR_WEIGHT": "0.5",
+            "RAG_APP_RETRIEVAL_KEYWORD_WEIGHT": "1.5",
+            "RAG_APP_RETRIEVAL_RRF_K": "30",
+        },
+    )
+    assert settings.hybrid_retrieval is False
+    assert settings.retrieval_vector_weight == 0.5
+    assert settings.retrieval_keyword_weight == 1.5
+    assert settings.retrieval_rrf_k == 30
+
+    with pytest.raises(ConfigurationError):
+        Settings.from_env(tmp_path, {"RAG_APP_HYBRID_RETRIEVAL": "maybe"})
+
+    with pytest.raises(ConfigurationError):
+        Settings.from_env(tmp_path, {"RAG_APP_RETRIEVAL_VECTOR_WEIGHT": "-1"})
+
+    with pytest.raises(ConfigurationError):
+        Settings.from_env(
+            tmp_path,
+            {
+                "RAG_APP_RETRIEVAL_VECTOR_WEIGHT": "0",
+                "RAG_APP_RETRIEVAL_KEYWORD_WEIGHT": "0",
+            },
+        )
+
+    with pytest.raises(ConfigurationError):
+        Settings.from_env(tmp_path, {"RAG_APP_RETRIEVAL_RRF_K": "0"})

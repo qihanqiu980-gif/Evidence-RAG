@@ -27,6 +27,10 @@ class Settings:
     chunk_overlap: int
     retrieval_top_k: int
     candidate_multiplier: int
+    hybrid_retrieval: bool
+    retrieval_vector_weight: float
+    retrieval_keyword_weight: float
+    retrieval_rrf_k: int
     max_subquestions: int
     upload_max_workers: int
     request_timeout_seconds: float
@@ -84,6 +88,14 @@ class Settings:
             except ValueError as exc:
                 raise ConfigurationError(f"{name} must be an integer") from exc
 
+        def boolean(name: str, default: bool) -> bool:
+            value = text(name, "true" if default else "false").casefold()
+            if value in {"true", "1", "yes", "on"}:
+                return True
+            if value in {"false", "0", "no", "off"}:
+                return False
+            raise ConfigurationError(f"{name} must be a boolean")
+
         def number(name: str, default: float) -> float:
             try:
                 return float(text(name, str(default)))
@@ -111,6 +123,10 @@ class Settings:
         chunk_overlap = integer("RAG_APP_CHUNK_OVERLAP", 100)
         retrieval_top_k = integer("RAG_APP_RETRIEVAL_TOP_K", 7)
         candidate_multiplier = integer("RAG_APP_CANDIDATE_MULTIPLIER", 20)
+        hybrid_retrieval = boolean("RAG_APP_HYBRID_RETRIEVAL", True)
+        retrieval_vector_weight = number("RAG_APP_RETRIEVAL_VECTOR_WEIGHT", 1.0)
+        retrieval_keyword_weight = number("RAG_APP_RETRIEVAL_KEYWORD_WEIGHT", 1.0)
+        retrieval_rrf_k = integer("RAG_APP_RETRIEVAL_RRF_K", 60)
         max_subquestions = integer("RAG_APP_MAX_SUBQUESTIONS", 5)
         upload_max_workers = integer("RAG_APP_UPLOAD_MAX_WORKERS", 2)
         request_timeout = number("RAG_APP_REQUEST_TIMEOUT_SECONDS", 60.0)
@@ -134,6 +150,20 @@ class Settings:
             raise ConfigurationError("RAG_APP_RETRIEVAL_TOP_K must be positive")
         if candidate_multiplier <= 0:
             raise ConfigurationError("RAG_APP_CANDIDATE_MULTIPLIER must be positive")
+        if not math.isfinite(retrieval_vector_weight) or retrieval_vector_weight < 0:
+            raise ConfigurationError(
+                "RAG_APP_RETRIEVAL_VECTOR_WEIGHT must be a non-negative finite number"
+            )
+        if not math.isfinite(retrieval_keyword_weight) or retrieval_keyword_weight < 0:
+            raise ConfigurationError(
+                "RAG_APP_RETRIEVAL_KEYWORD_WEIGHT must be a non-negative finite number"
+            )
+        if retrieval_rrf_k <= 0:
+            raise ConfigurationError("RAG_APP_RETRIEVAL_RRF_K must be positive")
+        if hybrid_retrieval and retrieval_vector_weight + retrieval_keyword_weight <= 0:
+            raise ConfigurationError(
+                "Hybrid retrieval requires a positive vector or keyword weight"
+            )
         if not 1 <= max_subquestions <= 5:
             raise ConfigurationError("RAG_APP_MAX_SUBQUESTIONS must be between 1 and 5")
         if not 1 <= upload_max_workers <= 8:
@@ -168,6 +198,10 @@ class Settings:
             chunk_overlap=chunk_overlap,
             retrieval_top_k=retrieval_top_k,
             candidate_multiplier=candidate_multiplier,
+            hybrid_retrieval=hybrid_retrieval,
+            retrieval_vector_weight=retrieval_vector_weight,
+            retrieval_keyword_weight=retrieval_keyword_weight,
+            retrieval_rrf_k=retrieval_rrf_k,
             max_subquestions=max_subquestions,
             upload_max_workers=upload_max_workers,
             request_timeout_seconds=request_timeout,

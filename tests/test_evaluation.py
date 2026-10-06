@@ -35,9 +35,15 @@ def test_fixed_dataset_passes_fake_provider_thresholds(tmp_path: Path) -> None:
     summary = summarize_evaluation(results)
     assert len(cases) >= 12
     assert summary.retrieval_hit_rate >= 0.85
+    assert summary.retrieval_mrr > 0.0
     assert summary.refusal_pass_rate == 1.0
     assert summary.overall_pass_rate == 1.0
     assert summary.scope_leak_count == 0
+    assert summary.citation_count > 0
+    assert summary.citation_accuracy is not None
+    assert summary.faithfulness_applicable_count > 0
+    assert summary.faithfulness_rate == 1.0
+    assert summary.faithfulness_error_count == 0
     assert all(result.duration_ms >= 0 for result in results)
     assert summary.total_duration_ms >= 0
     assert summary.estimated_cost is None
@@ -47,6 +53,9 @@ def test_fixed_dataset_passes_fake_provider_thresholds(tmp_path: Path) -> None:
     payload = evaluation_payload(summary, results)
     json.dumps(payload, ensure_ascii=False)
     assert payload["summary"]["p95_case_duration_ms"] >= 0
+    assert payload["summary"]["retrieval_mrr"] > 0.0
+    assert payload["summary"]["citation_accuracy"] is not None
+    assert payload["summary"]["faithfulness_rate"] == 1.0
     assert payload["summary"]["provider_metrics"]["operations"]
 
 
@@ -99,6 +108,19 @@ def _configure_provider(provider: FakeProvider, case) -> None:
                         "supported": True,
                         "complete": True,
                         "reason": "",
+                    }
+                ]
+            }
+        ]
+        if answerable
+        else [],
+        "faithfulness": [
+            {
+                "parts": [
+                    {
+                        "subquestion_id": "q1",
+                        "supported": True,
+                        "reason": "回答由引用证据支持",
                     }
                 ]
             }

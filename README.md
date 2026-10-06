@@ -134,7 +134,7 @@ cd frontend && pnpm run build && pnpm run test:e2e
 
 常用 CLI：`rag-app serve | doctor | rebuild | eval | backup | restore`
 
-评测：`.venv/bin/rag-app eval --dataset eval/cases.jsonl --top-k 7`。当前 online 基线 **14/14 通过**，检索命中率与拒答预期通过率均为 **100%**，并输出 MRR、引用准确率与忠实度，记录见 [`eval/baselines/`](eval/baselines/)。
+评测：`.venv/bin/rag-app eval --dataset eval/cases.jsonl --top-k 7`。当前混合检索 online 基线 **14/14 通过**，检索命中率与拒答预期通过率均为 **100%**，MRR **0.8974**、引用准确率 **81.08%**、忠实度 **100%**，且 provider 请求失败数为 0；记录见 [`eval/baselines/`](eval/baselines/)。
 
 ## 边界与计划
 

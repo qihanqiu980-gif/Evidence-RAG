@@ -90,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"documents={payload['counts']['documents']} "
                 f"chunks={payload['counts']['chunks']} "
                 f"vectors={payload['counts']['vectors']}"
+                " "
+                f"keyword_index={payload['counts']['keyword_index']}"
             )
         return 0 if payload["status"] == "ok" else 1
     if args.command == "rebuild":
@@ -174,7 +176,23 @@ def main(argv: list[str] | None = None) -> int:
                 f"cases: {summary.case_count} "
                 f"passed: {summary.overall_pass_count} "
                 f"retrieval_hit_rate: {summary.retrieval_hit_rate:.2%} "
+                f"retrieval_mrr: {summary.retrieval_mrr:.4f} "
                 f"refusal_pass_rate: {summary.refusal_pass_rate:.2%}"
+            )
+            citation_accuracy = (
+                f"{summary.citation_accuracy:.2%}"
+                if summary.citation_accuracy is not None
+                else "n/a"
+            )
+            faithfulness_rate = (
+                f"{summary.faithfulness_rate:.2%}"
+                if summary.faithfulness_rate is not None
+                else "n/a"
+            )
+            print(
+                f"quality: citation_accuracy={citation_accuracy} "
+                f"faithfulness_rate={faithfulness_rate} "
+                f"faithfulness_errors={summary.faithfulness_error_count}"
             )
             cost = (
                 f"{summary.estimated_cost:.8f} {summary.cost_currency}"
@@ -208,8 +226,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     f"{status}: {result.case_id} "
                     f"retrieval={result.retrieval_hit} "
+                    f"mrr={result.retrieval_reciprocal_rank} "
                     f"refusal={result.refusal_pass} "
                     f"evidence={result.evidence_count} "
+                    f"citations={result.citation_accurate_count}/{result.citation_count} "
+                    f"faithful={result.faithfulness_supported_count}/"
+                    f"{result.faithfulness_applicable_count} "
                     f"duration={result.duration_ms:.0f}ms "
                     f"retries={retry_count} "
                     f"failed_requests={failed_requests}"
@@ -283,6 +305,7 @@ def doctor(settings: Settings) -> dict[str, Any]:
     sqlite = SQLiteStore(settings.sqlite_path)
     kb_count, document_count, chunk_count = sqlite.counts()
     vector_count = 0
+    keyword_index_count = sqlite.keyword_index_count()
     active = sqlite.get_active_vector_collection()
 
     with sqlite.connect() as connection:
@@ -327,6 +350,9 @@ def doctor(settings: Settings) -> dict[str, Any]:
     if chunk_count != vector_count:
         errors.append("sqlite_chunk_vector_count_mismatch")
 
+    if keyword_index_count != chunk_count:
+        errors.append("keyword_index_count_mismatch")
+
     documents = [
         document
         for knowledge_base in sqlite.list_knowledge_bases()
@@ -352,6 +378,7 @@ def doctor(settings: Settings) -> dict[str, Any]:
             "documents": document_count,
             "chunks": chunk_count,
             "vectors": vector_count,
+            "keyword_index": keyword_index_count,
         },
     }
 

@@ -7,7 +7,8 @@ from enum import StrEnum
 from ..config import Settings
 from ..errors import ProviderResponseError
 from ..providers.base import ModelProvider
-from ..storage.chroma import ChromaVectorStore
+from ..storage.chroma import ChromaVectorStore, VectorMatch
+from ..storage.sqlite import KeywordMatch, SQLiteStore
 
 
 class EvidenceSupportStatus(StrEnum):
@@ -45,17 +46,34 @@ class EvidenceRetriever:
         settings: Settings,
         vectors: ChromaVectorStore,
         provider: ModelProvider,
+        sqlite: SQLiteStore,
     ) -> None:
         self.settings = settings
         self.vectors = vectors
         self.provider = provider
+        self.sqlite = sqlite
 
     def retrieve(self, query: str, kb_ids: Sequence[str]) -> RetrievalResult:
         candidate_limit = (
             self.settings.retrieval_top_k * self.settings.candidate_multiplier
         )
         query_embedding = self.provider.embed_query(query)
-        matches = self.vectors.search(query_embedding, kb_ids, candidate_limit)
+        vector_matches = self.vectors.search(query_embedding, kb_ids, candidate_limit)
+        if self.settings.hybrid_retrieval:
+            keyword_matches = self.sqlite.search_keyword(
+                query,
+                kb_ids,
+                candidate_limit,
+            )
+            matches = _rrf_fuse(
+                vector_matches,
+                keyword_matches,
+                vector_weight=self.settings.retrieval_vector_weight,
+                keyword_weight=self.settings.retrieval_keyword_weight,
+                rrf_k=self.settings.retrieval_rrf_k,
+            )
+        else:
+            matches = vector_matches
         if not matches:
             return RetrievalResult(query=query, evidence=())
 
@@ -90,6 +108,47 @@ class EvidenceRetriever:
             query=query,
             evidence=tuple(evidence[: self.settings.retrieval_top_k]),
         )
+
+
+def _rrf_fuse(
+    vector_matches: Sequence[VectorMatch],
+    keyword_matches: Sequence[KeywordMatch],
+    *,
+    vector_weight: float,
+    keyword_weight: float,
+    rrf_k: int,
+) -> list[VectorMatch]:
+    """Fuse two ranked lists with weighted Reciprocal Rank Fusion."""
+    candidates: dict[str, VectorMatch] = {}
+    scores: dict[str, float] = {}
+
+    for rank, match in enumerate(vector_matches, start=1):
+        candidates.setdefault(match.chunk_id, match)
+        scores[match.chunk_id] = (
+            scores.get(match.chunk_id, 0.0) + vector_weight / (rrf_k + rank)
+        )
+
+    for rank, keyword_match in enumerate(keyword_matches, start=1):
+        candidates.setdefault(
+            keyword_match.chunk_id,
+            VectorMatch(
+                chunk_id=keyword_match.chunk_id,
+                kb_id=keyword_match.kb_id,
+                document_id=keyword_match.document_id,
+                document_name=keyword_match.document_name,
+                heading_path=keyword_match.heading_path,
+                chunk_index=keyword_match.chunk_index,
+                content=keyword_match.content,
+                content_hash=keyword_match.content_hash,
+                similarity=0.0,
+            ),
+        )
+        scores[keyword_match.chunk_id] = (
+            scores.get(keyword_match.chunk_id, 0.0) + keyword_weight / (rrf_k + rank)
+        )
+
+    ordered = sorted(scores, key=lambda chunk_id: (-scores[chunk_id], chunk_id))
+    return [candidates[chunk_id] for chunk_id in ordered]
 
 
 def assign_reference_ids(

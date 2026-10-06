@@ -19,6 +19,7 @@ def test_doctor_reports_initialized_data_plane(tmp_path):
         "documents": 0,
         "chunks": 0,
         "vectors": 0,
+        "keyword_index": 0,
     }
 
 

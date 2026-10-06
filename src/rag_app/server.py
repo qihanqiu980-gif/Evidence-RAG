@@ -57,7 +57,7 @@ def build_container(
         selected_provider = OnlineModelProvider(settings)
         owns_provider = True
     workflow = (
-        EvidenceQAWorkflow(settings, vectors, selected_provider)
+        EvidenceQAWorkflow(settings, vectors, selected_provider, sqlite)
         if selected_provider is not None
         else None
     )
