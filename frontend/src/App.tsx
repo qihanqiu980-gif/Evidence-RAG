@@ -12,9 +12,17 @@ import {
   uploadDocumentsAsync,
   getUploadJob,
   cancelUploadJob,
+  getDiscovery,
+  analyzeDiscovery,
 } from './api'
 import { Badge, Icon, Modal, PageHeading } from './ui'
-import type { DocumentSummary, KnowledgeBase, SystemStatus, UploadJobSummary } from './types'
+import type {
+  DiscoverySummary,
+  DocumentSummary,
+  KnowledgeBase,
+  SystemStatus,
+  UploadJobSummary,
+} from './types'
 
 type Page = 'overview' | 'knowledge' | 'chat'
 type PendingDelete =
@@ -133,8 +141,10 @@ export default function App() {
   const [status, setStatus] = useState<SystemStatus>()
   const [bases, setBases] = useState<KnowledgeBase[]>([])
   const [documents, setDocuments] = useState<DocumentSummary[]>([])
+  const [discoveries, setDiscoveries] = useState<Record<string, DiscoverySummary>>({})
   const [activeId, setActiveId] = useState<string>()
   const [loadError, setLoadError] = useState<string>()
+  const [discoveryError, setDiscoveryError] = useState<string>()
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string>()
   const [newName, setNewName] = useState('')
@@ -150,34 +160,102 @@ export default function App() {
   const activeIdRef = useRef<string | undefined>(undefined)
   const retryFilesRef = useRef<File[]>([])
   const retryKbIdRef = useRef<string | undefined>(undefined)
+  const automaticDiscoveryRef = useRef<Set<string>>(new Set())
 
   activeIdRef.current = activeId
 
-  const refresh = useCallback(async (showConnecting = false) => {
-    if (showConnecting) setService('connecting')
+  const refreshDiscoveries = useCallback(async (ids: string[]) => {
+    if (ids.length === 0) return
+    const nextDiscoveries = await Promise.all(ids.map((id) => getDiscovery(id)))
+    setDiscoveries((current) => {
+      const merged = { ...current }
+      nextDiscoveries.forEach((summary) => {
+        merged[summary.kb_id] = summary
+      })
+      return merged
+    })
+  }, [])
+
+  const refresh = useCallback(
+    async (showConnecting = false) => {
+      if (showConnecting) setService('connecting')
+      try {
+        const [nextStatus, nextBases] = await Promise.all([getStatus(), listKnowledgeBases()])
+        const nextDocuments = (
+          await Promise.all(nextBases.map((base) => listDocuments(base.id)))
+        ).flat()
+        const selected =
+          nextBases.find((base) => base.id === activeIdRef.current)?.id ?? nextBases[0]?.id
+        await refreshDiscoveries(
+          nextBases.filter((base) => base.document_count > 0).map((base) => base.id),
+        )
+        setStatus(nextStatus)
+        setBases(nextBases)
+        setDocuments(nextDocuments)
+        setActiveId(selected)
+        setService(nextStatus.status)
+        setLoadError(undefined)
+      } catch (error) {
+        const message =
+          error instanceof ApiError ? error.message : '本地服务暂时不可用，请稍后重试。'
+        setService('error')
+        setLoadError(message)
+      }
+    },
+    [refreshDiscoveries],
+  )
+
+  const requestDiscovery = useCallback(async (kbId: string) => {
+    setDiscoveryError(undefined)
     try {
-      const [nextStatus, nextBases] = await Promise.all([getStatus(), listKnowledgeBases()])
-      const nextDocuments = (
-        await Promise.all(nextBases.map((base) => listDocuments(base.id)))
-      ).flat()
-      const selected =
-        nextBases.find((base) => base.id === activeIdRef.current)?.id ?? nextBases[0]?.id
-      setStatus(nextStatus)
-      setBases(nextBases)
-      setDocuments(nextDocuments)
-      setActiveId(selected)
-      setService(nextStatus.status)
-      setLoadError(undefined)
+      const summary = await analyzeDiscovery(kbId)
+      setDiscoveries((current) => ({ ...current, [summary.kb_id]: summary }))
+      return true
     } catch (error) {
-      const message = error instanceof ApiError ? error.message : '本地服务暂时不可用，请稍后重试。'
-      setService('error')
-      setLoadError(message)
+      setDiscoveryError(
+        error instanceof ApiError ? error.message : '知识分析未启动，请稍后重试。',
+      )
+      return false
     }
   }, [])
 
   useEffect(() => {
     void refresh(true)
   }, [refresh])
+
+  const discoveryPollIds = useMemo(
+    () =>
+      bases
+        .filter((base) => discoveries[base.id]?.status === 'pending' || discoveries[base.id]?.status === 'processing')
+        .map((base) => base.id),
+    [bases, discoveries],
+  )
+  const discoveryPollKey = discoveryPollIds.join(',')
+
+  useEffect(() => {
+    if (!discoveryPollKey) return
+    const ids = discoveryPollKey.split(',')
+    let cancelled = false
+    const timer = setTimeout(() => {
+      void refreshDiscoveries(ids).catch(() => {
+        if (!cancelled) setDiscoveryError('知识分析状态暂时不可用，请稍后刷新。')
+      })
+    }, 1000)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [discoveryPollKey, refreshDiscoveries])
+
+  useEffect(() => {
+    if (service !== 'ready' || !activeId) return
+    const target = bases.find((base) => base.id === activeId)
+    if (!target || target.document_count === 0) return
+    const summary = discoveries[target.id]
+    if (summary?.status !== 'not_analyzed' || automaticDiscoveryRef.current.has(target.id)) return
+    automaticDiscoveryRef.current.add(target.id)
+    void requestDiscovery(target.id)
+  }, [activeId, bases, discoveries, requestDiscovery, service])
 
   const active = bases.find((base) => base.id === activeId)
   const activeDocuments = useMemo(
@@ -908,9 +986,12 @@ export default function App() {
           <Chat
             bases={bases}
             documents={documents}
+            discoveries={discoveries}
             active={page === 'chat'}
             disabled={operationsDisabled}
             goKnowledge={() => setPage('knowledge')}
+            onAnalyze={requestDiscovery}
+            analysisError={discoveryError}
           />
         </main>
 

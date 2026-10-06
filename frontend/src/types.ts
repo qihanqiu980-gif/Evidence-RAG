@@ -72,6 +72,46 @@ export type UploadJobSummary = {
   items: UploadJobItem[]
 }
 
+export type DiscoveryStatus =
+  | 'not_analyzed'
+  | 'pending'
+  | 'processing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export type DiscoveryQuestion = {
+  id: string
+  question: string
+  source_chunk_ids: string[]
+}
+
+export type DiscoveryTopic = {
+  id: string
+  title: string
+  type: string
+  summary: string
+  document_ids: string[]
+  chunk_count: number
+  confidence: number
+  updated_at: string
+  questions: DiscoveryQuestion[]
+}
+
+export type DiscoverySummary = {
+  kb_id: string
+  status: DiscoveryStatus
+  job_id: string | null
+  code: string | null
+  message: string | null
+  document_count: number
+  chunk_count: number
+  topic_count: number
+  question_count: number
+  analyzed_at: string | null
+  topics: DiscoveryTopic[]
+}
+
 export type ChatHistoryMessage = {
   role: 'user' | 'assistant'
   content: string

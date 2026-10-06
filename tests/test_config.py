@@ -18,6 +18,15 @@ def test_settings_accept_explicit_environment_without_dotenv(tmp_path):
     assert settings.sqlite_path == tmp_path / "data" / "app.db"
 
 
+def test_discovery_model_defaults_to_flash(tmp_path):
+    settings = Settings.from_env(
+        tmp_path,
+        {"RAG_APP_API_KEY": "key", "RAG_APP_CHAT_MODEL": "qwen3.7-plus"},
+    )
+    assert settings.discovery_model == "qwen-flash"
+
+
+
 def test_missing_api_key_is_not_configured_but_is_valid(tmp_path):
     settings = Settings.from_env(tmp_path, {"RAG_APP_DATA_DIR": "data"})
     assert not settings.configured

@@ -81,6 +81,8 @@ class FakeProvider:
         messages: Sequence[Mapping[str, str]],
         *,
         task: str,
+        model: str | None = None,
+        response_format: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         self._metrics_tracker.record_request("chat")
         self._metrics_tracker.record_attempt("chat")

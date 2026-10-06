@@ -16,11 +16,14 @@ from ..core.jobs import UploadJobSnapshot
 from ..core.workflow import WorkflowEvent
 from ..errors import RagAppError
 from ..logging import safe_event_fields
-from ..models import Document, KnowledgeBase
+from ..models import DiscoveryTopicRecord, Document, KnowledgeBase
 from ..providers.base import ModelProvider
 from ..server import AppContainer, build_container
 from .contracts import (
     ChatRequest,
+    DiscoveryQuestionSummary,
+    DiscoverySummary,
+    DiscoveryTopicSummary,
     DocumentBatchResult,
     DocumentSummary,
     DocumentUploadError,
@@ -136,6 +139,7 @@ def build_app(
         status_code=status.HTTP_204_NO_CONTENT,
     )
     def delete_knowledge_base(kb_id: str) -> Response:
+        container.discovery.cancel_for_kb(kb_id)
         container.manager.delete(kb_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -154,6 +158,7 @@ def build_app(
     )
     def delete_document(kb_id: str, document_id: str) -> Response:
         container.manager.delete_document(kb_id, document_id)
+        _schedule_discovery(container, kb_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post(
@@ -167,6 +172,8 @@ def build_app(
         if not 1 <= len(files) <= settings.upload_max_files:
             raise _DomainResponse("validation_error", "Invalid upload file count")
         result = await _process_files(container, kb_id, files)
+        if result.documents:
+            _schedule_discovery(container, kb_id)
         return JSONResponse(
             status_code=_batch_status(result),
             content=result.model_dump(mode="json"),
@@ -196,8 +203,37 @@ def build_app(
                 settings.upload_max_bytes,
             )
             pending.append((filename, content))
-        job_id = container.jobs.submit(kb_id, pending, container.manager.ingest)
+        job_id = container.jobs.submit(
+            kb_id,
+            pending,
+            container.manager.ingest,
+            lambda snapshot: _schedule_discovery_after_upload(container, snapshot),
+        )
         return UploadJobCreated(job_id=job_id)
+
+    @app.get(
+        "/api/knowledge-bases/{kb_id}/discovery",
+        response_model=DiscoverySummary,
+    )
+    def get_discovery(kb_id: str) -> DiscoverySummary:
+        return _discovery_summary(container, kb_id)
+
+    @app.post(
+        "/api/knowledge-bases/{kb_id}/discovery/analyze",
+        response_model=DiscoverySummary,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def analyze_discovery(kb_id: str) -> DiscoverySummary:
+        container.sqlite.get_knowledge_base(kb_id)
+        if not container.settings.configured or container.provider is None:
+            raise _DomainResponse(
+                "configuration_missing",
+                "Model provider configuration is missing",
+            )
+        if not container.sqlite.list_documents(kb_id):
+            raise _DomainResponse("validation_error", "Knowledge base has no documents")
+        container.discovery.submit(kb_id, force=True)
+        return _discovery_summary(container, kb_id)
 
     @app.get("/api/jobs/{job_id}", response_model=UploadJobSummary)
     def get_upload_job(job_id: str) -> UploadJobSummary:
@@ -263,6 +299,8 @@ def build_app(
             finally:
                 progress.clear()
         result = DocumentBatchResult(documents=documents, errors=errors)
+        if documents:
+            _schedule_discovery(container, kb_id)
         return JSONResponse(
             status_code=_batch_status(result),
             content=result.model_dump(mode="json"),
@@ -344,6 +382,91 @@ def _job_summary(snapshot: UploadJobSnapshot) -> UploadJobSummary:
         created_at=snapshot.created_at,
         updated_at=snapshot.updated_at,
         items=items,
+    )
+
+
+def _schedule_discovery_after_upload(
+    container: AppContainer,
+    snapshot: UploadJobSnapshot,
+) -> None:
+    if snapshot.status == "completed" and any(
+        item.document is not None for item in snapshot.items
+    ):
+        _schedule_discovery(container, snapshot.kb_id, force=True)
+
+
+def _schedule_discovery(
+    container: AppContainer,
+    kb_id: str,
+    *,
+    force: bool = False,
+) -> None:
+    if not container.settings.configured or container.provider is None:
+        return
+    if not container.sqlite.list_documents(kb_id):
+        return
+    container.discovery.submit(kb_id, force=force)
+
+
+def _discovery_summary(container: AppContainer, kb_id: str) -> DiscoverySummary:
+    container.sqlite.get_knowledge_base(kb_id)
+    documents = container.sqlite.list_documents(kb_id)
+    chunks = container.sqlite.list_chunks(kb_id)
+    snapshot = container.sqlite.list_discovery(kb_id)
+    job = container.discovery.latest_for_kb(kb_id)
+    current_fingerprint = container.sqlite.discovery_fingerprint(kb_id)
+    fingerprint_matches = (
+        snapshot is not None and snapshot.source_fingerprint == current_fingerprint
+    )
+    in_progress = job is not None and job.status in {"pending", "processing"}
+    topics = snapshot.topics if snapshot is not None and (fingerprint_matches or in_progress) else ()
+
+    status = "not_analyzed"
+    if job is not None and job.status in {
+        "pending",
+        "processing",
+        "failed",
+        "cancelled",
+    }:
+        status = job.status
+    elif snapshot is not None and fingerprint_matches:
+        status = "completed"
+
+    return DiscoverySummary(
+        kb_id=kb_id,
+        status=status,  # type: ignore[arg-type]
+        job_id=job.job_id if job is not None else None,
+        code=job.code if job is not None else None,
+        message=job.message if job is not None else None,
+        document_count=len(documents),
+        chunk_count=len(chunks),
+        topic_count=len(topics),
+        question_count=sum(len(topic.questions) for topic in topics),
+        analyzed_at=snapshot.created_at if snapshot is not None else None,
+        topics=[_discovery_topic_summary(topic) for topic in topics],
+    )
+
+
+def _discovery_topic_summary(
+    topic: DiscoveryTopicRecord,
+) -> DiscoveryTopicSummary:
+    return DiscoveryTopicSummary(
+        id=topic.id,
+        title=topic.title,
+        type=topic.type,
+        summary=topic.summary,
+        document_ids=list(topic.document_ids),
+        chunk_count=topic.chunk_count,
+        confidence=topic.confidence,
+        updated_at=topic.updated_at,
+        questions=[
+            DiscoveryQuestionSummary(
+                id=item.id,
+                question=item.question,
+                source_chunk_ids=list(item.source_chunk_ids),
+            )
+            for item in topic.questions
+        ],
     )
 
 

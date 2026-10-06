@@ -16,6 +16,7 @@ class Settings:
     api_key: str
     base_url: str
     chat_model: str
+    discovery_model: str
     embedding_model: str
     embedding_dimension: int
     rerank_model: str
@@ -50,6 +51,7 @@ class Settings:
             self.api_key.strip()
             and self.base_url.strip()
             and self.chat_model.strip()
+            and self.discovery_model.strip()
             and self.embedding_model.strip()
             and self.rerank_model.strip()
             and self.rerank_url.strip()
@@ -184,6 +186,7 @@ class Settings:
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
             ),
             chat_model=text("RAG_APP_CHAT_MODEL", "qwen3.7-plus"),
+            discovery_model=text("RAG_APP_DISCOVERY_MODEL", "qwen-flash"),
             embedding_model=text("RAG_APP_EMBEDDING_MODEL", "text-embedding-v4"),
             embedding_dimension=embedding_dimension,
             rerank_model=text("RAG_APP_RERANK_MODEL", "qwen3-rerank"),

@@ -1,5 +1,6 @@
 import type {
   ChatRequest,
+  DiscoverySummary,
   DocumentBatchResult,
   KnowledgeBase,
   SseEvent,
@@ -112,6 +113,17 @@ export const uploadDocumentsAsync = (kbId: string, files: File[]) => {
 
 export const getUploadJob = (jobId: string) =>
   request<UploadJobSummary>(`/api/jobs/${encodeURIComponent(jobId)}`)
+
+export const getDiscovery = (kbId: string) =>
+  request<DiscoverySummary>(
+    `/api/knowledge-bases/${encodeURIComponent(kbId)}/discovery`,
+  )
+
+export const analyzeDiscovery = (kbId: string) =>
+  request<DiscoverySummary>(
+    `/api/knowledge-bases/${encodeURIComponent(kbId)}/discovery/analyze`,
+    { method: 'POST' },
+  )
 
 export const cancelUploadJob = (jobId: string) =>
   request<UploadJobSummary>(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {

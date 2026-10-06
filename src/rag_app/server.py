@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .config import Settings
+from .core.discovery import DiscoveryJobManager
 from .core.jobs import UploadJobManager
 from .core.knowledge_base import KnowledgeBaseManager
 from .core.registry import WorkflowRegistry
@@ -25,6 +26,7 @@ class AppContainer:
     workflow: EvidenceQAWorkflow | None
     workflow_registry: WorkflowRegistry
     jobs: UploadJobManager
+    discovery: DiscoveryJobManager
     owns_provider: bool = False
     _closed: bool = False
 
@@ -33,6 +35,7 @@ class AppContainer:
             return
         self._closed = True
         self.jobs.close()
+        self.discovery.close()
         if self.owns_provider and self.provider is not None:
             close = getattr(self.provider, "close", None)
             if callable(close):
@@ -68,6 +71,7 @@ def build_container(
     registry = WorkflowRegistry()
     if workflow is not None:
         registry.register("evidence_qa", workflow)
+    discovery = DiscoveryJobManager(sqlite, selected_provider, settings)
 
     return AppContainer(
         settings=settings,
@@ -85,5 +89,6 @@ def build_container(
         workflow=workflow,
         workflow_registry=registry,
         jobs=jobs,
+        discovery=discovery,
         owns_provider=owns_provider,
     )

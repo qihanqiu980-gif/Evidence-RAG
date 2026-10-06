@@ -154,6 +154,38 @@ class UploadJobCreated(BaseModel):
     job_id: str
 
 
+class DiscoveryQuestionSummary(BaseModel):
+    id: str
+    question: str = Field(min_length=1, max_length=4000)
+    source_chunk_ids: list[str] = Field(min_length=1)
+
+
+class DiscoveryTopicSummary(BaseModel):
+    id: str
+    title: str
+    type: str
+    summary: str
+    document_ids: list[str]
+    chunk_count: int = Field(ge=0)
+    confidence: float = Field(ge=0, le=1)
+    updated_at: datetime
+    questions: list[DiscoveryQuestionSummary]
+
+
+class DiscoverySummary(BaseModel):
+    kb_id: str
+    status: Literal["not_analyzed", "pending", "processing", "completed", "failed", "cancelled"]
+    job_id: str | None = None
+    code: str | None = None
+    message: str | None = None
+    document_count: int = Field(ge=0)
+    chunk_count: int = Field(ge=0)
+    topic_count: int = Field(ge=0)
+    question_count: int = Field(ge=0)
+    analyzed_at: datetime | None = None
+    topics: list[DiscoveryTopicSummary] = Field(default_factory=list)
+
+
 class UploadJobItemSummary(BaseModel):
     filename: str
     status: Literal["pending", "processing", "completed", "failed", "cancelled"]

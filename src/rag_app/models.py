@@ -52,3 +52,55 @@ class VectorCollection:
     created_at: datetime
     activated_at: datetime | None
     retired_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryQuestion:
+    question: str
+    source_chunk_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryTopicDraft:
+    title: str
+    type: str
+    summary: str
+    document_ids: tuple[str, ...]
+    source_chunk_ids: tuple[str, ...]
+    confidence: float
+    questions: tuple[DiscoveryQuestion, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryQuestionRecord:
+    id: str
+    topic_id: str
+    question: str
+    source_chunk_ids: tuple[str, ...]
+    sort_order: int
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryTopicRecord:
+    id: str
+    kb_id: str
+    title: str
+    type: str
+    summary: str
+    document_ids: tuple[str, ...]
+    chunk_count: int
+    confidence: float
+    updated_at: datetime
+    questions: tuple[DiscoveryQuestionRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoverySnapshot:
+    kb_id: str
+    source_fingerprint: str
+    document_count: int
+    chunk_count: int
+    topic_count: int
+    question_count: int
+    created_at: datetime
+    topics: tuple[DiscoveryTopicRecord, ...]

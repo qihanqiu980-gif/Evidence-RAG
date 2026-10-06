@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -14,6 +15,37 @@ import uvicorn
 from rag_app.api.app import build_app
 from rag_app.config import Settings
 from tests.fakes.provider import FakeProvider
+
+
+class E2EProvider(FakeProvider):
+    def chat_json(self, messages, *, task, model=None, response_format=None):
+        if task == "discovery_topics":
+            payload = json.loads(messages[1]["content"])
+            chunk_ids = [item["chunk_id"] for item in payload["chunks"][:2]]
+            return {
+                "topics": [
+                    {
+                        "title": "产品规格",
+                        "type": "概念",
+                        "summary": "无线能力",
+                        "confidence": 0.9,
+                        "source_chunk_ids": chunk_ids,
+                    }
+                ]
+            }
+        if task == "discovery_questions":
+            payload = json.loads(messages[1]["content"])
+            source_chunks = payload["topics"][0]["chunks"]
+            return {
+                "questions": [
+                    {
+                        "topic_id": "t1",
+                        "question": "星云智联 AX6000 支持 WiFi 6 吗？",
+                        "source_chunk_ids": [source_chunks[0]["chunk_id"]],
+                    }
+                ]
+            }
+        return super().chat_json(messages, task=task)
 
 
 def main() -> None:
@@ -35,7 +67,7 @@ def main() -> None:
             "RAG_APP_EMBEDDING_DIMENSION": "8",
         },
     )
-    provider = FakeProvider(settings.embedding_dimension)
+    provider = E2EProvider(settings.embedding_dimension)
     provider.chat_responses = {
         "decompose": {
             "standalone_question": "星云智联 AX6000 是否支持 WiFi 6？",

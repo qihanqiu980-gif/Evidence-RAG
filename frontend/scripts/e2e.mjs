@@ -131,6 +131,12 @@ try {
   await page.waitForFunction(() => document.body.innerText.includes('共 6 项，成功 6'), {
     timeout: 30000,
   })
+  await page.waitForFunction(() => {
+    const button = [...document.querySelectorAll('button')].find((item) =>
+      item.textContent?.includes('上传文档'),
+    )
+    return button instanceof HTMLButtonElement && !button.disabled
+  })
 
   const invalidUploadDir = await mkdtemp(path.join(tmpdir(), 'rag-app-e2e-upload-'))
   invalidUploadPath = path.join(invalidUploadDir, 'invalid.pdf')
@@ -163,8 +169,28 @@ try {
 
   await clickText('问答')
   await page.waitForSelector('textarea[aria-label="输入问题"]')
-  await page.type('textarea[aria-label="输入问题"]', '星云智联 AX6000 支持 WiFi 6 吗？')
-  await clickText('提问')
+  await page.waitForFunction(
+    () =>
+      document.body.innerText.includes('知识地图') &&
+      document.body.innerText.includes('已生成') &&
+      document.body.innerText.includes('产品规格'),
+    { timeout: 20000 },
+  )
+  await page.screenshot({ path: '/tmp/rag-app-e2e-discovery.png', fullPage: true })
+  const discoveryQuestion = await page.evaluate(() => {
+    const button = [...document.querySelectorAll('button')].find((item) =>
+      item.textContent?.includes('星云智联 AX6000 支持 WiFi 6 吗？'),
+    )
+    if (!(button instanceof HTMLButtonElement)) return ''
+    button.click()
+    return button.textContent ?? ''
+  })
+  if (!discoveryQuestion.includes('星云智联 AX6000 支持 WiFi 6 吗？')) {
+    throw new Error('Discovery question was not rendered')
+  }
+  if (!discoveryQuestion.includes('1 个来源')) {
+    throw new Error('Discovery question did not expose source binding')
+  }
   try {
     await page.waitForFunction(() => document.body.innerText.includes('回答完成'), {
       timeout: 20000,

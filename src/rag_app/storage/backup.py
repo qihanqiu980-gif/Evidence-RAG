@@ -128,6 +128,8 @@ def restore_backup(
         _replace(staging / "uploads", data_dir / "uploads")
         _replace(staging / "chroma", data_dir / "chroma")
         _remove_stale_sqlite_journals(data_dir)
+        if manifest.schema_version < SCHEMA_VERSION:
+            SQLiteStore(data_dir / "app.db")
 
     return RestoreResult(manifest=manifest, data_dir=data_dir)
 
@@ -196,9 +198,9 @@ def _load_manifest(path: Path) -> BackupManifest:
 
 
 def _validate_manifest(manifest: BackupManifest) -> None:
-    if manifest.schema_version != SCHEMA_VERSION:
+    if manifest.schema_version > SCHEMA_VERSION:
         raise StorageInconsistentError(
-            f"Backup schema version {manifest.schema_version} does not match "
+            f"Backup schema version {manifest.schema_version} is newer than "
             f"the current version {SCHEMA_VERSION}"
         )
 

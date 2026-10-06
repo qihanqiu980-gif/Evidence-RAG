@@ -122,13 +122,17 @@ class OnlineModelProvider:
         messages: Sequence[Mapping[str, str]],
         *,
         task: str,
+        model: str | None = None,
+        response_format: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         self._metrics_tracker.record_request("chat")
-        payload = {
-            "model": self._settings.chat_model,
+        payload: dict[str, Any] = {
+            "model": model or self._settings.chat_model,
             "temperature": 0,
             "messages": [dict(message) for message in messages],
         }
+        if response_format is not None:
+            payload["response_format"] = dict(response_format)
         try:
             data = self._request("/chat/completions", payload, operation="chat")
             self._record_usage("chat", data)

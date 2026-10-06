@@ -3,6 +3,8 @@ import { ApiError, streamChat } from './api'
 import { Badge, Icon, PageHeading } from './ui'
 import type {
   ChatHistoryMessage,
+  DiscoverySummary,
+  DiscoveryTopic,
   DocumentSummary,
   Evidence,
   EvidenceDecision,
@@ -33,6 +35,7 @@ type AssistantMessage = {
 type ChatMessage =
   | { id: number; role: 'user'; text: string }
   | AssistantMessage
+type ScopedDiscoveryTopic = DiscoveryTopic & { knowledgeBaseName: string }
 
 const stageLabels: { stage: WorkflowStage; label: string }[] = [
   { stage: 'decompose', label: '问题拆分' },
@@ -240,35 +243,237 @@ function ExecutionPanel({ message }: { message?: AssistantMessage }) {
   )
 }
 
-function suggestionsFor(documents: DocumentSummary[]): string[] {
-  const names = documents.map((item) => item.filename)
-  const candidates: [string, string][] = [
-    ['01', '产品的主要技术规格是什么？'],
-    ['02', '安装和联网需要注意什么？'],
-    ['03', 'WiFi 和网络设置如何操作？'],
-    ['04', '如何组网、升级固件或恢复出厂设置？'],
-    ['05', '指示灯异常应该如何排查？'],
-    ['06', '保修和售后政策是什么？'],
-  ]
-  return candidates.filter(([prefix]) => names.some((name) => name.includes(prefix))).map(([, question]) => question)
+function DiscoveryPanel({
+  documents,
+  discoveries,
+  topics,
+  canAnalyze,
+  analysisBusy,
+  analysisError,
+  onRegenerate,
+  onAsk,
+  questionDisabled,
+}: {
+  documents: DocumentSummary[]
+  discoveries: DiscoverySummary[]
+  topics: ScopedDiscoveryTopic[]
+  canAnalyze: boolean
+  analysisBusy: boolean
+  analysisError?: string
+  onRegenerate: () => void
+  onAsk: (question: string) => void
+  questionDisabled: boolean
+}) {
+  const statuses = new Set(discoveries.map((item) => item.status))
+  const hasDocuments = documents.length > 0
+  const pending = statuses.has('pending') || statuses.has('processing')
+  const ready = statuses.has('completed')
+  const failed = statuses.has('failed') || statuses.has('cancelled')
+  const topicCount = topics.length
+  const questionCount = topics.reduce((sum, topic) => sum + topic.questions.length, 0)
+  const chunkCount = documents.reduce((sum, document) => sum + document.chunk_count, 0)
+  const sortedTopics = [...topics].sort((left, right) => right.chunk_count - left.chunk_count)
+  const strongTopics = sortedTopics.slice(0, 3)
+  const strongIds = new Set(strongTopics.map((topic) => topic.id))
+  const sparseTopics = sortedTopics
+    .filter((topic) => topic.chunk_count <= 2 && !strongIds.has(topic.id))
+    .slice(0, 3)
+
+  const state = !hasDocuments
+    ? { label: '暂无文档', tone: 'neutral' as const }
+    : pending
+      ? { label: '分析中', tone: 'blue' as const }
+      : failed
+        ? { label: '分析失败', tone: 'danger' as const }
+        : ready
+          ? { label: '已生成', tone: 'ok' as const }
+          : { label: '未分析', tone: 'neutral' as const }
+
+  return (
+    <section className="mt-5 rounded-[8px] border border-[var(--line)] bg-[var(--surface-muted)] p-4" aria-label="知识地图">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="m-0 text-[16px] font-semibold">知识地图</h3>
+            <Badge tone={state.tone} busy={pending}>
+              {state.label}
+            </Badge>
+          </div>
+          <p className="m-0 mt-1 text-[14px] text-[var(--muted)]">
+            {hasDocuments
+              ? `${documents.length} 份文档 · ${chunkCount} 个文本块 · 已识别 ${topicCount} 个主题、${questionCount} 个可问问题`
+              : '上传文档后生成基于当前资料的可问清单。'}
+          </p>
+        </div>
+        {hasDocuments && (
+          <button
+            type="button"
+            className="btn"
+            onClick={onRegenerate}
+            disabled={!canAnalyze || analysisBusy}
+          >
+            <Icon name="refresh" size={16} />
+            {analysisBusy ? '分析中' : ready ? '重新分析' : '生成可问清单'}
+          </button>
+        )}
+      </div>
+
+      {analysisError && (
+        <p className="m-0 mt-3 break-words text-[13px] text-[var(--danger)]">{analysisError}</p>
+      )}
+      {!analysisError && failed && (
+        <p className="m-0 mt-3 text-[13px] text-[var(--danger)]">
+          上次知识分析未完成，可重新分析。
+        </p>
+      )}
+      {ready && pending && (
+        <p className="m-0 mt-3 text-[13px] text-[var(--muted)]">
+          部分知识库仍在生成可问清单。
+        </p>
+      )}
+
+      {topics.length > 0 && (
+        <>
+          <div className="mt-4 grid grid-cols-2 gap-2 text-[13px] lg:grid-cols-4">
+            {[
+              { label: '文档', value: documents.length, unit: '份' },
+              { label: '文本块', value: chunkCount, unit: '个' },
+              { label: '主题', value: topicCount, unit: '个' },
+              { label: '可问问题', value: questionCount, unit: '条' },
+            ].map((item) => (
+              <div key={item.label} className="rounded-[6px] bg-white px-3 py-2">
+                <span className="text-[var(--muted)]">{item.label}</span>
+                <div className="mt-0.5 text-[16px] font-semibold tabular-nums">
+                  {item.value}
+                  <span className="ml-1 text-[13px] font-normal text-[var(--muted)]">
+                    {item.unit}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {(strongTopics.length > 0 || sparseTopics.length > 0) && (
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {strongTopics.length > 0 && (
+                <div className="rounded-[6px] bg-white px-3 py-2.5">
+                  <div className="text-[13px] font-medium text-[var(--muted)]">资料较充分</div>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {strongTopics.map((topic) => (
+                      <span
+                        key={`strong-${topic.id}`}
+                        className="rounded-[4px] bg-[var(--ok-soft)] px-2 py-0.5 text-[13px] text-[var(--ok)]"
+                      >
+                        {topic.title}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {sparseTopics.length > 0 && (
+                <div className="rounded-[6px] bg-white px-3 py-2.5">
+                  <div className="text-[13px] font-medium text-[var(--muted)]">资料较少</div>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {sparseTopics.map((topic) => (
+                      <span
+                        key={`sparse-${topic.id}`}
+                        className="rounded-[4px] bg-[var(--warn-soft)] px-2 py-0.5 text-[13px] text-[var(--warn)]"
+                      >
+                        {topic.title}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="mt-4 grid gap-3">
+            {topics.map((topic) => (
+              <article key={topic.id} className="rounded-[8px] border border-[var(--line)] bg-white p-3.5">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="m-0 break-words text-[15px] font-semibold">{topic.title}</h4>
+                      <Badge tone="neutral">{topic.type}</Badge>
+                      <Badge tone="blue">{topic.chunk_count} 个片段</Badge>
+                    </div>
+                    {topic.summary && (
+                      <p className="m-0 mt-1 break-words text-[13px] text-[var(--muted)]">
+                        {topic.summary}
+                      </p>
+                    )}
+                  </div>
+                  <span className="text-[13px] text-[var(--muted)] tabular-nums">
+                    信心 {Math.round(topic.confidence * 100)}%
+                  </span>
+                </div>
+                {topic.knowledgeBaseName && (
+                  <div className="mt-1 text-[13px] text-[var(--muted)]">
+                    来源：{topic.knowledgeBaseName}
+                  </div>
+                )}
+                <ul className="m-0 mt-3 grid list-none gap-2 p-0">
+                  {topic.questions.map((question) => (
+                    <li key={question.id}>
+                      <button
+                        type="button"
+                        className="flex w-full items-center justify-between gap-3 rounded-[6px] border border-[var(--line)] bg-white px-3 py-2 text-left text-[14px] hover:border-[var(--line-hover)] hover:bg-[#f7f9fc] disabled:cursor-not-allowed disabled:opacity-60"
+                        onClick={() => onAsk(question.question)}
+                        disabled={questionDisabled}
+                      >
+                        <span className="min-w-0 break-words">{question.question}</span>
+                        <span className="flex shrink-0 items-center gap-2 text-[13px] text-[var(--muted)]">
+                          {question.source_chunk_ids.length} 个来源
+                          <Icon name="send" size={15} />
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
+
+      {hasDocuments && !ready && !pending && !failed && (
+        <p className="m-0 mt-3 text-[14px] text-[var(--muted)]">
+          尚未生成可问清单。
+        </p>
+      )}
+      {hasDocuments && ready && topics.length === 0 && (
+        <p className="m-0 mt-3 text-[14px] text-[var(--muted)]">
+          本次资料中没有识别出可用主题。
+        </p>
+      )}
+    </section>
+  )
 }
 
 export default function Chat({
   bases,
   documents,
+  discoveries,
   active,
   disabled,
   goKnowledge,
+  onAnalyze,
+  analysisError,
 }: {
   bases: KnowledgeBase[]
   documents: DocumentSummary[]
+  discoveries: Record<string, DiscoverySummary>
   active: boolean
   disabled: boolean
   goKnowledge: () => void
+  onAnalyze: (kbId: string) => Promise<boolean>
+  analysisError?: string
 }) {
   const [selected, setSelected] = useState<string[]>([])
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
+  const [analysisRequesting, setAnalysisRequesting] = useState(false)
   const sessionRef = useRef(0)
   const sequenceRef = useRef(0)
   const controllerRef = useRef<AbortController | null>(null)
@@ -283,7 +488,34 @@ export default function Chat({
     () => documents.filter((document) => scope.includes(document.kb_id)),
     [documents, scope],
   )
-  const suggestions = useMemo(() => suggestionsFor(scopeDocuments), [scopeDocuments])
+  const scopedDiscoveries = useMemo(
+    () => scope.flatMap((id) => (discoveries[id] ? [discoveries[id]] : [])),
+    [discoveries, scope],
+  )
+  const discoveryTopics = useMemo(
+    () =>
+      scopedDiscoveries.flatMap((summary) => {
+        const knowledgeBaseName =
+          bases.find((base) => base.id === summary.kb_id)?.name ?? ''
+        return summary.topics.map((topic) => ({ ...topic, knowledgeBaseName }))
+      }),
+    [bases, scopedDiscoveries],
+  )
+  const discoveryPending = scopedDiscoveries.some(
+    (summary) => summary.status === 'pending' || summary.status === 'processing',
+  )
+  const analysisBusy = discoveryPending || analysisRequesting
+  const analysisTargetIds = scope.filter((id) =>
+    documents.some((document) => document.kb_id === id),
+  )
+  const canAnalyze = !disabled && analysisTargetIds.length > 0 && !analysisBusy
+
+  const regenerateDiscovery = async () => {
+    if (!canAnalyze) return
+    setAnalysisRequesting(true)
+    await Promise.all(analysisTargetIds.map((id) => onAnalyze(id)))
+    setAnalysisRequesting(false)
+  }
 
   useEffect(() => {
     if (!selectedInitializedRef.current && bases.length > 0) {
@@ -550,34 +782,22 @@ export default function Chat({
 
           <div className="flex-1 px-4 py-5 sm:px-5">
             {messages.length === 0 ? (
-              <div className="mx-auto max-w-[560px] py-8">
+              <div className="mx-auto max-w-[720px] py-8">
                 <h2 className="t-section m-0">还没有提问</h2>
                 <p className="m-0 mt-1 text-[15px] text-[var(--muted)]">
                   回答只依据所选知识库中的文档，证据不足时会明确拒答。
                 </p>
-                {canAsk && suggestions.length > 0 && (
-                  <div className="mt-5">
-                    <div className="mb-2 text-[13px] text-[var(--muted)]">可以从文档主题开始</div>
-                    <div className="grid gap-2">
-                      {suggestions.map((question) => (
-                        <button
-                          key={question}
-                          type="button"
-                          className="flex items-center justify-between gap-3 rounded-[6px] border border-[var(--line)] bg-white px-3.5 py-2.5 text-left text-[15px] hover:border-[var(--line-hover)] hover:bg-[#f7f9fc]"
-                          onClick={() => ask(question)}
-                        >
-                          <span className="min-w-0 break-words">{question}</span>
-                          <Icon name="send" size={16} />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {canAsk && suggestions.length === 0 && (
-                  <p className="m-0 mt-4 text-[14px] text-[var(--muted)]">
-                    所选知识库中还没有可识别的示例文档，可以先提问具体内容。
-                  </p>
-                )}
+                <DiscoveryPanel
+                  documents={scopeDocuments}
+                  discoveries={scopedDiscoveries}
+                  topics={discoveryTopics}
+                  canAnalyze={canAnalyze}
+                  analysisBusy={analysisBusy}
+                  analysisError={analysisError}
+                  onRegenerate={() => void regenerateDiscovery()}
+                  onAsk={ask}
+                  questionDisabled={!canAsk || busy}
+                />
               </div>
             ) : (
               <div className="grid gap-6">

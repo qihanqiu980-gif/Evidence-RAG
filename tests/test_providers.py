@@ -194,6 +194,38 @@ def test_online_provider_parses_compatible_json_variants(
         provider.close()
 
 
+def test_online_chat_json_supports_task_model_and_json_response_format(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"ok":true}'}}]},
+        )
+
+    provider = OnlineModelProvider(
+        settings,
+        client=httpx.Client(
+            base_url="https://provider.test",
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+    try:
+        provider.chat_json(
+            [{"role": "user", "content": "test"}],
+            task="discovery_topics",
+            model="qwen-flash",
+            response_format={"type": "json_object"},
+        )
+    finally:
+        provider.close()
+
+    assert requests[0]["model"] == "qwen-flash"
+    assert requests[0]["response_format"] == {"type": "json_object"}
+
+
 def test_online_chat_json_uses_prompt_contract_without_response_format(tmp_path: Path):
     settings = make_settings(tmp_path)
     requests: list[dict] = []

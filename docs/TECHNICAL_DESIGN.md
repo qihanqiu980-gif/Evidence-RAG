@@ -4,10 +4,10 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v0.7 |
-| 文档状态 | M10 已完成 |
-| 对应 PRD | `rag-app/docs/PRD.md` v0.7 |
-| 技术阶段 | M10 检索质量增强 |
+| 文档版本 | v0.8 |
+| 文档状态 | M11 已完成 |
+| 对应 PRD | `rag-app/docs/PRD.md` v0.8 |
+| 技术阶段 | M11 知识发现 |
 
 本文定义 `rag-app` 第一版的模块结构、数据模型、Provider 边界、问答编排、API/SSE 契约、CLI 和测试策略。实现如需偏离本文，应先更新文档并说明原因。
 
@@ -34,6 +34,7 @@ FastAPI Application
         │
         ├── Knowledge Base / Document API
         ├── Async Upload Jobs
+        ├── Knowledge Discovery Jobs
         ├── Evidence QA Workflow
         ├── Status API
         └── Static Frontend
@@ -45,6 +46,7 @@ FastAPI Application
         │     └── Chroma Vector Store
         │
         ├── UploadJobManager (ThreadPool + spool)
+        ├── DiscoveryJobManager (ThreadPool + SQLite cache)
         │
         └── ModelProvider Adapter
               ├── OpenAI-compatible Chat
@@ -99,6 +101,7 @@ rag-app/
 │   │   └── sse.py
 │   ├── core/
 │   │   ├── knowledge_base.py
+│   │   ├── discovery.py
 │   │   ├── adapters.py
 │   │   ├── ingestion.py
 │   │   ├── jobs.py
@@ -298,6 +301,49 @@ CREATE TABLE vector_collections (
     retired_at TEXT
 );
 
+CREATE TABLE discovery_runs (
+    id TEXT PRIMARY KEY,
+    kb_id TEXT NOT NULL,
+    source_fingerprint TEXT NOT NULL,
+    document_count INTEGER NOT NULL,
+    chunk_count INTEGER NOT NULL,
+    topic_count INTEGER NOT NULL,
+    question_count INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+);
+
+CREATE TABLE discovery_topics (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    kb_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    type TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    document_ids TEXT NOT NULL,
+    sort_order INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES discovery_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+);
+
+CREATE TABLE discovery_questions (
+    id TEXT PRIMARY KEY,
+    topic_id TEXT NOT NULL,
+    question TEXT NOT NULL,
+    source_chunk_ids TEXT NOT NULL,
+    sort_order INTEGER NOT NULL,
+    FOREIGN KEY (topic_id) REFERENCES discovery_topics(id) ON DELETE CASCADE
+);
+
+CREATE TABLE discovery_topic_coverage (
+    topic_id TEXT PRIMARY KEY,
+    chunk_count INTEGER NOT NULL,
+    confidence REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (topic_id) REFERENCES discovery_topics(id) ON DELETE CASCADE
+);
+
 CREATE UNIQUE INDEX one_active_vector_collection
 ON vector_collections(status)
 WHERE status = 'active';
@@ -309,9 +355,10 @@ WHERE status = 'active';
 - `documents` 保存 ready 文档、同库去重、原文件路径和 chunk 统计。
 - `chunks` 保存切块业务事实，用于审计、doctor 对账和重建。
 - `vector_collections` 记录当前激活 Chroma collection、模型名和维度。
+- discovery 表缓存每个 KB 最近一次主题地图；`document_ids` 与 `source_chunk_ids` 均为 JSON 数组。
 - `heading_path` 保存 JSON 数组字符串。
 
-SQLite 连接启用 `foreign_keys`、WAL 和 `busy_timeout`。文档与 chunk 的写入使用显式事务。
+SQLite 连接启用 `foreign_keys`、WAL 和 `busy_timeout`。业务 schema 当前为 v2；v1 备份恢复后自动迁移并创建 discovery 表。文档与 chunk 的写入使用显式事务。
 
 ## 8. Uploads 与 Chroma 设计
 
@@ -549,6 +596,29 @@ SQLite metadata
 
 清理必须幂等。清理失败返回 `storage_inconsistent`，不得伪装成功。
 
+### 10.4 知识发现
+
+知识发现不参与证据问答编排，也不扩大回答边界；它只把已入库资料转换为可点击的问题入口。
+
+```text
+document ready
+→ sample chunks (max 240)
+→ discovery_topics：归纳 4-8 个主题
+→ discovery_questions：每个主题生成 2-4 个问题
+→ 服务端过滤 source_chunk_ids
+→ fingerprint 事务校验
+→ SQLite discovery cache
+```
+
+- `DiscoveryJobManager` 使用单线程进程内队列，不引入 Celery / Redis。
+- 同步上传、异步上传完成、demo 导入和文档删除后自动调度或失效；知识库删除随外键级联清理。
+- 主题规划输入文档名、heading path 和最长 220 字符摘录；问题生成输入主题下最多 8 个 chunk 和最长 700 字符摘录。
+- 模型返回的 chunk ID 必须存在于输入集合；问题来源必须属于对应主题，否则丢弃该主题或问题。
+- 数据面指纹由该 KB 全量 chunk 的 `id + content_hash` 计算。保存前在同一个事务内复核指纹，防止分析期间上传或删除造成旧地图覆盖新数据。
+- `topic_coverage.chunk_count` 使用主题规划阶段绑定的真实 chunk 去重计数；每条问题仍保留自己的 `source_chunk_ids`。
+- 打开页面只读 SQLite 缓存；前端对 pending / processing 每秒轮询，用户点击“重新分析”才强制提交新 job。
+- 点击推荐问题仅把问题文本交给 `/api/chat/stream`，不携带预生成答案，也不绕过检索、判定、生成或校验。
+
 ## 11. 删除与重建
 
 ### 11.1 删除文档
@@ -694,6 +764,8 @@ compose(validated_parts, decisions) -> FinalAnswer
 - `DELETE /api/knowledge-bases/{kb_id}/documents/{document_id}`
 - `GET /api/jobs/{job_id}` → 任务状态 + 逐文件结果/进度
 - `POST /api/jobs/{job_id}/cancel` → `202` + 当前任务快照
+- `GET /api/knowledge-bases/{kb_id}/discovery` → 主题地图 + 可问问题
+- `POST /api/knowledge-bases/{kb_id}/discovery/analyze` → `202` + 当前 discovery 状态
 - `POST /api/knowledge-bases/{kb_id}/import-demo`
 - `POST /api/chat/stream`
 
@@ -762,6 +834,9 @@ compose(validated_parts, decisions) -> FinalAnswer
 | `UploadJobCreated` | `job_id` | 异步上传提交响应 |
 | `UploadJobItemSummary` | `filename`, `status`, `code`, `message`, `progress`, `document` | 异步任务逐文件结果 |
 | `UploadJobSummary` | `job_id`, `kb_id`, `status`, `created_at`, `updated_at`, `items` | 异步任务查询响应 |
+| `DiscoveryQuestionSummary` | `id`, `question`, `source_chunk_ids` | 可问问题及真实来源 |
+| `DiscoveryTopicSummary` | `id`, `title`, `type`, `summary`, `document_ids`, `chunk_count`, `confidence`, `updated_at`, `questions` | 主题地图节点 |
+| `DiscoverySummary` | `kb_id`, `status`, `job_id`, `code`, `message`, `document_count`, `chunk_count`, `topic_count`, `question_count`, `analyzed_at`, `topics` | 知识发现状态与缓存结果 |
 | `SseEvent` | `type`, `stage`, `message`, `sequence`, `payload` | SSE envelope |
 
 约束：
@@ -772,6 +847,8 @@ compose(validated_parts, decisions) -> FinalAnswer
 - `DocumentBatchResult.documents` 只包含已成功入库的文档。
 - 重复与失败只出现在 `errors` 中，不进入文档列表。
 - `KnowledgeBaseSummary.chunk_count` 由该库 ready 文档累计得出。
+- `DiscoverySummary.status` 可为 `not_analyzed`、`pending`、`processing`、`completed`、`failed`、`cancelled`；数据面指纹不匹配时返回 `not_analyzed` 且不返回主题。
+- `DiscoveryQuestionSummary.source_chunk_ids` 非空且必须指向当前 KB 的真实 chunk。
 - 删除成功返回 `204 No Content`，无响应体。
 
 ### 13.4 文档上传 DTO
@@ -1006,10 +1083,11 @@ M10 新增指标定义：
 
 | 层 | 覆盖 |
 | --- | --- |
-| Unit | 配置、hash、切块、SQLite、Chroma metadata、rerank、多格式抽取、spool 启动清理、job 取消边界 |
-| Integration | 上传（同步 + 异步）、提交预检、取消 API、删除、doctor、rebuild、多库过滤、失败补偿、backup / restore |
+| Unit | 配置、hash、切块、SQLite、Chroma metadata、rerank、多格式抽取、spool 启动清理、job 取消边界、知识发现来源过滤与缓存失效 |
+| Integration | 上传（同步 + 异步）、提交预检、取消 API、删除、doctor、rebuild、多库过滤、失败补偿、backup / restore、知识发现 API 与异步任务 |
 | Workflow | 拆分、判定、生成、校验、一次重生成、局部拒答 |
 | API contract | DTO、状态码、错误码、SSE schema、安全输出 |
+| Frontend E2E | 知识地图渲染、来源绑定展示、点击可问问题进入证据问答 |
 | Evaluation | Fake Provider 指标与固定 badcase |
 | Online smoke | 真实配置连通性与人工验收 |
 

@@ -3,8 +3,8 @@
 | 项目 | 内容 |
 | --- | --- |
 | 产品名称 | 本地 RAG 知识库工作台 |
-| 文档版本 | v0.2 |
-| 日期 | 2026-10-05 |
+| 文档版本 | v0.3 |
+| 日期 | 2026-10-06 |
 | 设计范围 | React + Vite 工作台三页界面、全局状态、组件规范与响应式规则 |
 | 状态 | 已确认（API/SSE 契约已冻结） |
 
@@ -311,7 +311,7 @@
 | 无知识库 | 还没有知识库 | 新建知识库 |
 | 知识库无文档 | 这个知识库还没有文档 | 上传文档、导入示例资料 |
 | 无已就绪文档 | 所选知识库中还没有已就绪的文档 | 前往知识库页 |
-| 无会话 | 还没有提问 | 显示建议问题 |
+| 无会话 | 还没有提问 | 显示知识地图和可问清单 |
 | 无检索证据 | 没有检索到相关资料 | 无强制操作 |
 
 空态居中放置在对应面板内部，不使用插画或装饰图形。
@@ -456,7 +456,9 @@
 
 ### 会话空态
 
-空态展示证据问答规则和来自已就绪文档的建议问题。建议问题最多 4 条，单列排布，避免用户被示例淹没。
+空态展示证据问答规则与知识地图。知识地图按当前选中的一个或多个知识库聚合，包含文档数、chunk 数、主题数、可问问题数、覆盖强弱主题和具体主题问题。主题与问题来自服务端 discovery 缓存，不使用文件名前缀硬编码；未分析、分析中、失败和空资料分别显示对应状态与操作。
+
+主题卡按顺序展示主题名、类型、片段数、信心值、摘要、来源知识库和 2-4 个问题按钮。每个问题按钮右侧显示来源 chunk 数；点击后仅提交问题文本，回答仍由证据问答链路实时生成。
 
 ### 处理中
 
@@ -529,7 +531,11 @@
 | 文档 | 已就绪 | 文档表显示最终 chunk 数 |
 | 上传 | 部分成功 | 每份文件独立结果，不互相覆盖 |
 | 问答 | 未选范围 | 输入禁用并说明原因 |
-| 问答 | 空会话 | 建议问题和证据规则 |
+| 问答 | 空会话 | 知识地图、主题问题和证据规则 |
+| 知识发现 | 未分析 | 显示生成入口，已有文档时自动触发 |
+| 知识发现 | 分析中 | 显示进行中状态，禁止重复提交 |
+| 知识发现 | 完成 | 展示主题、覆盖统计和来源绑定问题 |
+| 知识发现 | 失败 | 显示安全错误摘要和重新分析入口 |
 | 问答 | 处理中 | 阶段流，无正文预览 |
 | 问答 | 回答完成 | 正文加引用编号 |
 | 问答 | 局部拒答 | 有证据部分回答，其余列入拒答 |
@@ -721,6 +727,8 @@
 | `/api/knowledge-bases/{kb_id}/documents` | `GET` | 无 | `DocumentSummary[]` |
 | `/api/knowledge-bases/{kb_id}/documents` | `POST` | multipart files | `DocumentBatchResult` |
 | `/api/knowledge-bases/{kb_id}/documents/{document_id}` | `DELETE` | 无 | `204 No Content` |
+| `/api/knowledge-bases/{kb_id}/discovery` | `GET` | 无 | `DiscoverySummary` |
+| `/api/knowledge-bases/{kb_id}/discovery/analyze` | `POST` | 无 | `DiscoverySummary` |
 | `/api/knowledge-bases/{kb_id}/import-demo` | `POST` | 无 | `DocumentBatchResult` |
 | `/api/chat/stream` | `POST` | `ChatRequest` | SSE `SseEvent` |
 
@@ -732,6 +740,9 @@
 | `KnowledgeBaseSummary` | `id`, `name`, `document_count`, `chunk_count`, `created_at` |
 | `DocumentSummary` | `id`, `kb_id`, `filename`, `status`, `chunk_count`, `created_at` |
 | `DocumentBatchResult` | `documents`, `errors` |
+| `DiscoverySummary` | `status`, `document_count`, `chunk_count`, `topic_count`, `question_count`, `topics` |
+| `DiscoveryTopicSummary` | `title`, `type`, `summary`, `chunk_count`, `confidence`, `questions` |
+| `DiscoveryQuestionSummary` | `question`, `source_chunk_ids.length` |
 | `ChatRequest` | `question`, `history`, `kb_ids` |
 | `SseEvent` | `type`, `stage`, `message`, `sequence`, `payload` |
 

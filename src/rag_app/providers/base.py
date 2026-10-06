@@ -171,6 +171,8 @@ class ModelProvider(Protocol):
         messages: Sequence[Mapping[str, str]],
         *,
         task: str,
+        model: str | None = None,
+        response_format: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         """Return a parsed JSON object for a workflow task."""
 

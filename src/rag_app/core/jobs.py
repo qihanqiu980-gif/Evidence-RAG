@@ -14,6 +14,7 @@ from ..models import Document
 
 logger = logging.getLogger(__name__)
 UploadTask = Callable[[str, str, bytes, Callable[[str], None]], Document]
+UploadCompletionCallback = Callable[["UploadJobSnapshot"], None]
 TERMINAL_JOB_STATUSES = frozenset({"completed", "cancelled"})
 
 
@@ -64,6 +65,7 @@ class UploadJobManager:
         kb_id: str,
         files: Sequence[tuple[str, bytes]],
         ingest: UploadTask,
+        on_complete: UploadCompletionCallback | None = None,
     ) -> str:
         """Queue a batch of raw files for ingestion and return a job id."""
         if not files:
@@ -88,6 +90,7 @@ class UploadJobManager:
                 )
                 for filename, _ in files
             ),
+            on_complete=on_complete,
         )
 
         try:
@@ -152,6 +155,7 @@ class UploadJobManager:
             self._cancel_items(job_id, 0)
             self._cleanup_spool(job_id, files)
             self._finalize(job_id, "cancelled")
+            self._notify_completion(job_id)
             return
 
         self._mark(job_id, "processing")
@@ -160,6 +164,7 @@ class UploadJobManager:
                 self._cancel_items(job_id, index)
                 self._cleanup_spool(job_id, files)
                 self._finalize(job_id, "cancelled")
+                self._notify_completion(job_id)
                 return
 
             self._set_item(
@@ -279,9 +284,11 @@ class UploadJobManager:
                 self._cancel_items(job_id, index + 1)
                 self._cleanup_spool(job_id, files)
                 self._finalize(job_id, "cancelled")
+                self._notify_completion(job_id)
                 return
 
         self._finalize(job_id, "completed")
+        self._notify_completion(job_id)
 
     def _cancel_requested(self, job_id: str) -> bool:
         with self._lock:
@@ -318,6 +325,22 @@ class UploadJobManager:
             job = self._jobs[job_id]
             job.status = job_status
             job.updated_at = datetime.now(UTC)
+
+    def _notify_completion(self, job_id: str) -> None:
+        snapshot = self.snapshot(job_id)
+        if snapshot is None:
+            return
+        with self._lock:
+            callback = self._jobs[job_id].on_complete
+        if callback is None:
+            return
+        try:
+            callback(snapshot)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "upload completion callback failed",
+                extra={"job_id": job_id},
+            )
 
     def _mark(self, job_id: str, job_status: str) -> None:
         self._finalize(job_id, job_status)
@@ -369,6 +392,7 @@ class _Job:
     created_at: datetime
     updated_at: datetime
     items: tuple[UploadJobItem, ...]
+    on_complete: UploadCompletionCallback | None
     cancel_requested: bool = False
 
     def snapshot(self) -> UploadJobSnapshot:
